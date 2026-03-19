@@ -32,11 +32,28 @@ num_test = 548-num_train;
 traj_start_ind = 94;
 
 %% Load/Organize Data
-in_folder_name = '../Data/Input/';
-out_folder_name = '../Data/Output/20_08_15_IN_LK7Normalized_OUT_FMwoFa5_Dimx12_Epochs1000_512Train/';
-load([in_folder_name, 'flapping_wing_aerodynamics_lasso_fit']);             % Load GPSSM inputs
-load([in_folder_name, 'flapping_wing_aerodynamics.mat']);                   % Load Lasso results and model
-load([out_folder_name, 'matfiles/predict_train_n_test.mat']);               % Load GPSSM outputs
+in_folder_name  = fullfile('..','Data','Input');
+out_folder_name = fullfile('..','..','Data','Output','Output_folder');  % outputs from training
+
+% Convert to absolute canonical path (optional but good)
+in_folder_name  = fullfile(pwd, "..", "Data", "Input");
+out_folder_name = fullfile(pwd, "..", "..", "Data", "Output", "Output_folder");
+
+in_folder_name  = char(java.io.File(in_folder_name).getCanonicalPath());
+out_folder_name = char(java.io.File(out_folder_name).getCanonicalPath());
+
+figBase = fullfile(out_folder_name,'figures');
+mkdir(figBase);
+mkdir(fullfile(figBase,'xcorr_figures'));
+mkdir(fullfile(figBase,'traj_figures'));
+mkdir(fullfile(figBase,'hist_figures'));
+mkdir(fullfile(figBase,'errorvsobs_figures'));
+
+% Load files
+load(fullfile(in_folder_name,  'flapping_wing_aerodynamics_lasso_fit.mat')); % GPSSM inputs / lasso fit
+load(fullfile(in_folder_name,  'flapping_wing_aerodynamics.mat'));          % dataset
+load(fullfile(out_folder_name, 'matfiles','predict_train_n_test.mat'));     % PRSSM outputs
+load(fullfile(out_folder_name, 'matfiles','training_loss.mat'));            % loss vs epoch (if used)
 
 gp_mean_train = permute(gp_mean_train(:,traj_start_ind:end,:),[2,3,1]);
 gp_mean_test = permute(gp_mean_test(:,traj_start_ind:end,:),[2,3,1]);
@@ -421,7 +438,11 @@ if latent_state_analysis
             L = [1, hslc(3)];
             colormap(fhslcolormap(10,H,S,L))
             box on
-            saveas(fig,[out_folder_name,'figures/xcorr_figures/scatter',num2str(10*j+k)],'pdf')
+            fname = fullfile(out_folder_name,'figures','xcorr_figures', ...
+                ['scatter' num2str(10*j+k) '.pdf']);
+            disp("Saving to: " + fname)
+            assert(exist(fileparts(fname),'dir')==7, "Folder missing: " + fileparts(fname))
+            exportgraphics(fig, fname, 'ContentType','vector');
             
             
                     

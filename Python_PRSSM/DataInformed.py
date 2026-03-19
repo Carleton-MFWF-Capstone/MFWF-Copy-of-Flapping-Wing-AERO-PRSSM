@@ -20,7 +20,7 @@ seq_stride = seq_len    # distance between two sub-trajectories, in this applica
 # directories
 parent_dir = os.path.dirname(os.getcwd())
 in_dir = parent_dir + '/Data/Input/'
-out_dir = parent_dir + '/Data/Output/' + 'Output_folder/'  # Replace the folder name with the desired one
+out_dir = parent_dir + '/Data/Output/' + 'Output_folder_earlystop5/'  # Replace the folder name with the desired one
 model_dir = out_dir[:]
 
 if not os.path.exists(out_dir):
@@ -29,7 +29,7 @@ if not os.path.exists(out_dir):
 # training settings
 num_gpus = 1  # (for multi-GPU //// not implemented in this version needs improvement)
 gpus = ['/device:GPU:' + str(x) for x in range(num_gpus)]
-epochs = 5  # number of epochs for training (make sure in training plot afterwards that converged)
+epochs = 500  # number of epochs for training (make sure in training plot afterwards that converged)
 test_data = True
 
 # config
@@ -40,7 +40,7 @@ if answer.upper() in ["Y", "YES"]:
     retrain = False
     model_config = {
         # dataset
-        'batch_size': 16,  # batch size
+        'batch_size': 8,  # batch size
         'shuffle': 10000,  # shuffle buffer size
         'lik_seq_length_factor': lik_seq_length_factor,
         # method
