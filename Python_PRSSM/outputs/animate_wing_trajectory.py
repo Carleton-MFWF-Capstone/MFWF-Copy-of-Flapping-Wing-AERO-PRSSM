@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -8,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import animation
 from matplotlib.gridspec import GridSpec
-from matplotlib.widgets import Button, RadioButtons, Slider, TextBox
+from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider, TextBox
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.io import loadmat
 
@@ -21,6 +22,23 @@ OUTPUT_VARIABLE_DESCRIPTIONS = {
     "CM_y": "chordwise moment coefficient",
     "CM_z": "spanwise moment coefficient",
 }
+INPUT_ARROW_COLORS = {
+    "AoA": "#7b6cff",
+    "|v|": "#1f77b4",
+    "a_x": "#2a9d8f",
+    "a_y": "#2a9d8f",
+    "a_z": "#2a9d8f",
+    "alpha_dot": "#bc6c25",
+    "alpha_ddot": "#a4243b",
+}
+OUTPUT_ARROW_COLORS = {
+    "CF_x": "#00876c",
+    "CF_y": "#00a6ca",
+    "CM_x": "#ef476f",
+    "CM_y": "#f4a261",
+    "CM_z": "#8338ec",
+}
+PREDICTED_LINE_COLOR = "#000000"
 INPUT_VARIABLE_NAMES = [
     "AoA",
     "|v|",
@@ -30,7 +48,18 @@ INPUT_VARIABLE_NAMES = [
     "alpha_dot",
     "alpha_ddot",
 ]
+INPUT_VARIABLE_DESCRIPTIONS = {
+    "AoA": "angle of attack",
+    "|v|": "wing speed magnitude",
+    "a_x": "x-acceleration in the wing frame",
+    "a_y": "y-acceleration in the wing frame",
+    "a_z": "z-acceleration in the wing frame",
+    "alpha_dot": "wing pitch rate",
+    "alpha_ddot": "wing pitch acceleration",
+}
 POSITION_NAMES = ["stroke", "deviation", "rotation"]
+INPUT_INDEX = {name: i for i, name in enumerate(INPUT_VARIABLE_NAMES)}
+OUTPUT_INDEX = {name: i for i, name in enumerate(OUTPUT_VARIABLE_NAMES)}
 AXIS_LABELS = {
     "x": "stroke plane direction",
     "y": "deviation direction",
@@ -70,6 +99,17 @@ FILTER_METRIC_ORDER = [
     "Mean CF_y",
     "RMSE (all outputs)",
 ]
+FILTER_METRIC_DISPLAY = {
+    "Stroke amplitude [deg]": "Stroke ampl [deg]",
+    "Deviation amplitude [deg]": "Deviation ampl [deg]",
+    "Rotation amplitude [deg]": "Rotation ampl [deg]",
+    "Mean AoA": "Mean AoA",
+    "Mean |v|": "Mean |v|",
+    "Peak |v|": "Peak |v|",
+    "Mean CF_x": "Mean CF_x",
+    "Mean CF_y": "Mean CF_y",
+    "RMSE (all outputs)": "RMSE all outputs",
+}
 FILTER_METRIC_RULES = {
     "Stroke amplitude [deg]": "peak-to-peak stroke angle across the trajectory",
     "Deviation amplitude [deg]": "peak-to-peak deviation angle across the trajectory",
@@ -80,6 +120,13 @@ FILTER_METRIC_RULES = {
     "Mean CF_x": "average normal force coefficient over the trajectory",
     "Mean CF_y": "average chordwise force coefficient over the trajectory",
     "RMSE (all outputs)": "root-mean-square prediction error across all outputs",
+}
+SLIDER_LABELS = {
+    "frame": "Frame",
+    "trajectory": "Trajectory",
+    "speed": "Speed",
+    "filter_min": "Metric Min",
+    "filter_max": "Metric Max",
 }
 
 
@@ -92,8 +139,15 @@ def to_windows_long_path(path: Path) -> str:
     return "\\\\?\\" + abs_path
 
 
+def path_exists_long(path: Path) -> bool:
+    try:
+        return os.path.exists(to_windows_long_path(path))
+    except Exception:
+        return False
+
+
 def load_clean_mat(path: Path) -> Dict[str, np.ndarray]:
-    if not path.exists():
+    if not path_exists_long(path):
         raise FileNotFoundError(
             f"Missing MATLAB file: {path}\n"
             f"Expected a model output folder containing a prediction MAT file."
@@ -106,6 +160,30 @@ def denormalize(arr: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarra
     mean = np.asarray(mean, dtype=float).reshape(1, 1, -1)
     std = np.asarray(std, dtype=float).reshape(1, 1, -1)
     return arr * std + mean
+
+
+def compute_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    y_pred = np.asarray(y_pred, dtype=float).ravel()
+    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+
+
+def compute_r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    y_pred = np.asarray(y_pred, dtype=float).ravel()
+    ss_res = float(np.sum((y_true - y_pred) ** 2))
+    ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
+    if np.isclose(ss_tot, 0.0):
+        return float("nan")
+    return 1.0 - (ss_res / ss_tot)
+
+
+def normalize_vector(vec: np.ndarray) -> np.ndarray:
+    vec = np.asarray(vec, dtype=float)
+    norm = float(np.linalg.norm(vec))
+    if norm < 1e-12:
+        return np.zeros_like(vec)
+    return vec / norm
 
 
 def get_output_roots() -> List[Path]:
@@ -124,6 +202,19 @@ def build_default_out_dir(out_folder_name: str) -> Path:
     return get_output_roots()[0] / out_folder_name
 
 
+def has_prediction_mat_file(out_dir: Path) -> bool:
+    mat_dir = out_dir / "matfiles"
+    if not mat_dir.exists():
+        return False
+
+    for path in mat_dir.glob("*.mat"):
+        name = path.name.lower()
+        if "predict" in name or ("train" in name and "test" in name):
+            return True
+
+    return any(mat_dir.glob("*.mat"))
+
+
 def list_available_output_dirs() -> List[Path]:
     candidates: List[Path] = []
     seen = set()
@@ -133,8 +224,7 @@ def list_available_output_dirs() -> List[Path]:
         for child in sorted(output_root.iterdir()):
             if not child.is_dir():
                 continue
-            predict_file = child / "matfiles" / "predict_train_n_test.mat"
-            if predict_file.exists():
+            if has_prediction_mat_file(child):
                 resolved = str(child.resolve())
                 if resolved not in seen:
                     candidates.append(child)
@@ -146,7 +236,7 @@ def choose_output_dir_interactive() -> Path:
     candidates = list_available_output_dirs()
     if not candidates:
         raise FileNotFoundError(
-            "No output folders with matfiles/predict_train_n_test.mat were found under:\n"
+            "No output folders with usable MAT files were found under:\n"
             + "\n".join(str(root) for root in get_output_roots())
         )
 
@@ -400,13 +490,24 @@ class WingTrajectoryAnimator:
         self.mat = load_clean_mat(self.mat_file)
         self.split = split
         self.speed = speed
-        self.trace_mode = "Full traces"
+        self.trace_mode = "2D Full Traces"
         self.category_name = "All"
         self.filter_metric_name = FILTER_METRIC_ORDER[0]
         self.filter_min = None
         self.filter_max = None
-        self.tip_tracer_mode = "Tracer ON"
-        self.info_mode = "Details"
+        self.tip_tracer_mode = "3D Tip Tracer ON"
+        self.extrema_mode = "Extrema OFF"
+        self.error_metrics_mode = "Errors OFF"
+        self.instant_error_mode = "Inst Error OFF"
+        self.input_arrows_mode = "Input Arrows OFF"
+        self.output_arrows_mode = "Output Arrows OFF"
+        self.legend_popup_fig = None
+        self.input_selector_popup_fig = None
+        self.output_selector_popup_fig = None
+        self.input_selector_checks = None
+        self.output_selector_checks = None
+        self.selected_input_arrow_vars = set(INPUT_VARIABLE_NAMES)
+        self.selected_output_arrow_vars = set(OUTPUT_VARIABLE_NAMES)
         self.paused = True
         self.frame_idx = 0
         self.frame_float = 0.0
@@ -418,16 +519,9 @@ class WingTrajectoryAnimator:
         self.traj_index = int(np.clip(traj_index, 0, self.current.n_traj - 1))
         self.filtered_indices = np.arange(self.current.n_traj, dtype=int)
 
-        self.fig = plt.figure(figsize=(17.5, 11.5), constrained_layout=False, facecolor="#f3f1eb")
-        self.gs = GridSpec(
-            10,
-            6,
-            figure=self.fig,
-            width_ratios=[1.45, 1.25, 1.2, 1.2, 0.95, 1.05],
-            height_ratios=[1.0, 1.0, 1.0, 1.0, 1.0, 0.48, 0.48, 0.48, 0.48, 0.48],
-            wspace=0.34,
-            hspace=0.78,
-        )
+        self.fig = plt.figure(figsize=(17.4, 10.4), constrained_layout=False, facecolor="#f4f1ea")
+        self.fig.subplots_adjust(left=0.028, right=0.988, top=0.89, bottom=0.055)
+        self.gs = GridSpec(1, 3, figure=self.fig, width_ratios=[1.0, 1.0, 1.0], wspace=0.08)
         self._build_figure()
         self._load_trajectory(self.traj_index)
         self._update_frame(0)
@@ -466,13 +560,62 @@ class WingTrajectoryAnimator:
 
     def _build_figure(self) -> None:
         self.fig.suptitle("Flapping Wing Trajectory Animation", fontsize=18, y=0.975, fontweight="bold")
+        self.header_text = self.fig.text(
+            0.5,
+            0.924,
+            "",
+            fontsize=8.6,
+            ha="center",
+            va="center",
+            color="#5b5345",
+        )
+        left_gs = self.gs[0, 0].subgridspec(
+            12,
+            1,
+            height_ratios=[1, 1, 1, 1, 1, 1, 0.75, 0.9, 0.9, 0.9, 0.52, 0.12],
+            hspace=0.48,
+        )
+        center_gs = self.gs[0, 1].subgridspec(
+            13,
+            1,
+            height_ratios=[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0.18, 0.98, 1.0],
+            hspace=0.74,
+        )
+        right_gs = self.gs[0, 2].subgridspec(
+            18,
+            2,
+            width_ratios=[1.0, 1.0],
+            height_ratios=[
+                0.86,
+                0.86,
+                0.26,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                0.30,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                0.86,
+                0.56,
+                0.56,
+                0.62,
+                0.62,
+            ],
+            hspace=0.60,
+            wspace=0.18,
+        )
 
-        self.ax3d = self.fig.add_subplot(self.gs[:5, :2], projection="3d")
-        self.ax3d.set_title("Wing Motion in 3D", pad=16, fontsize=13, fontweight="bold")
-        self.ax3d.set_xlabel("x (stroke plane direction)")
-        self.ax3d.set_ylabel("y (deviation direction)")
-        self.ax3d.set_zlabel("z (span / tip direction)")
-        self.ax3d.view_init(elev=24, azim=-56)
+        self.ax3d = self.fig.add_subplot(left_gs[:6, 0], projection="3d")
+        self.ax3d.set_title("Wing Motion in Wing Frame", pad=20, fontsize=13, fontweight="bold")
+        self.ax3d.set_xlabel("x_w (stroke axis)", labelpad=4)
+        self.ax3d.set_ylabel("y_w (deviation axis)", labelpad=4)
+        self.ax3d.set_zlabel("z_w (span axis)", labelpad=4)
+        self.ax3d.tick_params(labelsize=8.5, pad=1)
+        self.ax3d.view_init(elev=24, azim=-118)
         self.ax3d.set_box_aspect((1.2, 1.0, 1.0))
         self.ax3d.grid(False)
         self.ax3d.set_facecolor("#fbfaf7")
@@ -491,15 +634,24 @@ class WingTrajectoryAnimator:
         self.trailing_tip_marker, = self.ax3d.plot([], [], [], marker="o", color="#4c72b0", markersize=5)
         self.wing_patch = Poly3DCollection([], facecolors="#d9d3c3", edgecolors="black", linewidths=1.0, alpha=0.65)
         self.ax3d.add_collection3d(self.wing_patch)
-        self.status_text = self.fig.text(
-            0.045,
-            0.905,
+        self.input_arrow_artists: List = []
+        self.output_arrow_artists: List = []
+
+        self.ax_details = self.fig.add_subplot(left_gs[7:10, 0])
+        self.ax_details.axis("off")
+        self.ax_details.set_facecolor("#fffdf8")
+        self.ax_details.set_title("Selection Details", fontsize=10.5, fontweight="bold", pad=5)
+        self.info_text = self.ax_details.text(
+            0.02,
+            0.98,
             "",
-            fontsize=10,
             va="top",
             ha="left",
+            fontsize=7.2,
             family="monospace",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="#fffdf8", edgecolor="#d8d2c2", alpha=0.95),
+            linespacing=1.02,
+            wrap=True,
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="#fffdf8", edgecolor="#d8d2c2"),
         )
 
         self.output_axes = []
@@ -508,43 +660,96 @@ class WingTrajectoryAnimator:
         self.cursor_lines = []
         self.actual_markers = []
         self.pred_markers = []
+        self.metric_texts = []
+        self.instant_error_texts = []
+        self.extrema_markers = []
+        self.extrema_texts = []
         for i, name in enumerate(OUTPUT_VARIABLE_NAMES):
-            ax = self.fig.add_subplot(self.gs[i, 2:4])
-            ax.set_title(name, fontsize=11, pad=6, fontweight="bold")
+            ax = self.fig.add_subplot(center_gs[2 * i:2 * i + 2, 0])
+            ax.set_title(
+                f"{name} ({OUTPUT_VARIABLE_DESCRIPTIONS[name]})",
+                fontsize=9.4,
+                pad=7,
+                fontweight="bold",
+            )
+            ax.set_ylabel(f"{name} [-]", fontsize=8.2, labelpad=7)
             ax.grid(True, alpha=0.22, color="#b8b1a1")
             ax.set_xlim(0.0, 1.0)
             ax.set_facecolor("#fffdf8")
+            ax.tick_params(labelsize=8.2, pad=1.5)
             for spine in ax.spines.values():
                 spine.set_color("#d8d2c2")
-            truth_line, = ax.plot([], [], color="#2a9d8f", linewidth=2.0, label="Measured")
-            pred_line, = ax.plot([], [], color="#d55e00", linewidth=1.8, linestyle="--", label="Predicted")
+            line_color = OUTPUT_ARROW_COLORS[name]
+            truth_line, = ax.plot([], [], color=line_color, linewidth=2.0, label="Measured")
+            pred_line, = ax.plot([], [], color=PREDICTED_LINE_COLOR, linewidth=1.8, linestyle="--", label="Predicted")
             cursor = ax.axvline(0.0, color="black", alpha=0.25, linewidth=1.0)
-            actual_marker, = ax.plot([], [], marker="o", color="#2a9d8f", markersize=5)
-            pred_marker, = ax.plot([], [], marker="o", color="#d55e00", markersize=5)
-            ax.text(
-                0.01,
-                0.88,
-                OUTPUT_VARIABLE_DESCRIPTIONS[name],
-                transform=ax.transAxes,
-                fontsize=8,
-                color="#5b5345",
-                ha="left",
-                va="top",
-            )
-            if i == len(OUTPUT_VARIABLE_NAMES) - 1:
-                ax.set_xlabel("Normalized cycle time")
+            actual_marker, = ax.plot([], [], marker="o", color=line_color, markersize=5)
+            pred_marker, = ax.plot([], [], marker="o", color=PREDICTED_LINE_COLOR, markersize=5, markerfacecolor="white")
+            if i != len(OUTPUT_VARIABLE_NAMES) - 1:
+                ax.set_xlabel("")
+                ax.tick_params(labelbottom=False)
+            else:
+                ax.set_xlabel("Cycle time [-]", labelpad=3, fontsize=9.0)
             self.output_axes.append(ax)
             self.truth_lines.append(truth_line)
             self.pred_lines.append(pred_line)
             self.cursor_lines.append(cursor)
             self.actual_markers.append(actual_marker)
             self.pred_markers.append(pred_marker)
+            self.metric_texts.append(
+                ax.text(
+                    0.985,
+                    0.06,
+                    "",
+                    transform=ax.transAxes,
+                    fontsize=7.0,
+                    color="#332f26",
+                    ha="right",
+                    va="bottom",
+                    bbox=dict(boxstyle="round,pad=0.22", facecolor="#fffdf8", edgecolor="#d8d2c2", alpha=0.92),
+                )
+            )
+            self.instant_error_texts.append(
+                ax.text(
+                    0.015,
+                    0.06,
+                    "",
+                    transform=ax.transAxes,
+                    fontsize=7.0,
+                    color="#332f26",
+                    ha="left",
+                    va="bottom",
+                    bbox=dict(boxstyle="round,pad=0.22", facecolor="#fffdf8", edgecolor="#d8d2c2", alpha=0.92),
+                    visible=False,
+                )
+            )
+            truth_extrema_color = line_color
+            pred_extrema_color = PREDICTED_LINE_COLOR
+            extrema_markers = [
+                ax.plot([], [], marker="^", color=truth_extrema_color, markersize=5, linestyle="None", visible=False)[0],
+                ax.plot([], [], marker="v", color=truth_extrema_color, markersize=5, linestyle="None", visible=False)[0],
+                ax.plot([], [], marker="^", color=pred_extrema_color, markersize=5, linestyle="None", visible=False)[0],
+                ax.plot([], [], marker="v", color=pred_extrema_color, markersize=5, linestyle="None", visible=False)[0],
+            ]
+            extrema_texts = [
+                ax.text(0.0, 0.0, "", fontsize=7.0, color=truth_extrema_color, visible=False, ha="left", va="bottom"),
+                ax.text(0.0, 0.0, "", fontsize=7.0, color=truth_extrema_color, visible=False, ha="left", va="top"),
+                ax.text(0.0, 0.0, "", fontsize=7.0, color=pred_extrema_color, visible=False, ha="right", va="bottom"),
+                ax.text(0.0, 0.0, "", fontsize=7.0, color=pred_extrema_color, visible=False, ha="right", va="top"),
+            ]
+            self.extrema_markers.append(extrema_markers)
+            self.extrema_texts.append(extrema_texts)
 
-        self.fig.legend(
+        frame_gs = center_gs[11:13, 0].subgridspec(2, 1, height_ratios=[0.72, 0.28], hspace=0.16)
+        self.ax_frame = self.fig.add_subplot(frame_gs[0, 0])
+        self.ax_plot_legend = self.fig.add_subplot(frame_gs[1, 0])
+        self.ax_plot_legend.axis("off")
+        self.ax_plot_legend.set_facecolor("#f4f1ea")
+        self.ax_plot_legend.legend(
             [self.truth_lines[0], self.pred_lines[0]],
             ["Measured", "Predicted"],
-            loc="upper center",
-            bbox_to_anchor=(0.55, 0.952),
+            loc="center",
+            bbox_to_anchor=(0.5, 0.22),
             ncol=2,
             frameon=True,
             facecolor="#fffdf8",
@@ -552,91 +757,95 @@ class WingTrajectoryAnimator:
             fontsize=9,
         )
 
-        self.ax_info = self.fig.add_subplot(self.gs[:5, 4:6])
-        self.ax_info.axis("off")
-        self.ax_info.set_facecolor("#fffdf8")
-        self.ax_info.set_title("Selection Details", fontsize=11, fontweight="bold", pad=10)
-        self.info_text = self.ax_info.text(
-            0.0,
-            1.0,
-            "",
-            va="top",
-            ha="left",
-            fontsize=8.2,
-            family="monospace",
-            linespacing=1.18,
-            bbox=dict(boxstyle="round,pad=0.35", facecolor="#fffdf8", edgecolor="#d8d2c2"),
-        )
-
-        self.ax_split = self.fig.add_subplot(self.gs[5:8, 0])
-        self.ax_category = self.fig.add_subplot(self.gs[5:10, 1])
-        self.ax_metric = self.fig.add_subplot(self.gs[5:8, 4])
-        self.ax_frame = self.fig.add_subplot(self.gs[5, 2:4])
-        self.ax_traj = self.fig.add_subplot(self.gs[6, 2:4])
-        self.ax_speed = self.fig.add_subplot(self.gs[7, 2:4])
-        self.ax_filter_min = self.fig.add_subplot(self.gs[8, 2:4])
-        self.ax_filter_max = self.fig.add_subplot(self.gs[9, 2:4])
-        self.ax_min_box = self.fig.add_subplot(self.gs[8, 5])
-        self.ax_max_box = self.fig.add_subplot(self.gs[9, 5])
-        self.ax_play = self.fig.add_subplot(self.gs[5, 5])
-        self.ax_reset = self.fig.add_subplot(self.gs[6, 5])
-        self.ax_trace = self.fig.add_subplot(self.gs[7, 5])
-        self.ax_tracer = self.fig.add_subplot(self.gs[8, 0])
-        self.ax_toggle_guide = self.fig.add_subplot(self.gs[8, 5])
-        self.ax_toggle_details = self.fig.add_subplot(self.gs[9, 5])
+        self.ax_split = self.fig.add_subplot(right_gs[0:2, 0])
+        self.ax_category = self.fig.add_subplot(right_gs[3:7, 0])
+        self.ax_metric = self.fig.add_subplot(right_gs[8:15, 0])
+        self.ax_traj = self.fig.add_subplot(right_gs[0:2, 1])
+        self.ax_traj_box = self.fig.add_subplot(right_gs[2:4, 1])
+        self.ax_speed = self.fig.add_subplot(right_gs[5:7, 1])
+        self.ax_filter_min = self.fig.add_subplot(right_gs[7:9, 1])
+        self.ax_filter_max = self.fig.add_subplot(right_gs[10:12, 1])
+        self.ax_min_box = self.fig.add_subplot(right_gs[12:13, 1])
+        self.ax_max_box = self.fig.add_subplot(right_gs[13:14, 1])
+        action_gs = right_gs[15:18, :].subgridspec(4, 3, wspace=0.18, hspace=0.18)
+        self.ax_var_legend = self.fig.add_subplot(action_gs[0, 0])
+        self.ax_tracer = self.fig.add_subplot(action_gs[0, 1])
+        self.ax_input_arrows = self.fig.add_subplot(action_gs[0, 2])
+        self.ax_output_arrows = self.fig.add_subplot(action_gs[1, 0])
+        self.ax_extrema = self.fig.add_subplot(action_gs[1, 1])
+        self.ax_errors = self.fig.add_subplot(action_gs[1, 2])
+        self.ax_instant_error = self.fig.add_subplot(action_gs[2, 0])
+        self.ax_play = self.fig.add_subplot(action_gs[2, 1])
+        self.ax_reset = self.fig.add_subplot(action_gs[2, 2])
+        self.ax_trace = self.fig.add_subplot(action_gs[3, 1])
 
         self.radio_split = RadioButtons(self.ax_split, ("test", "train"), active=0 if self.split == "test" else 1)
-        self._style_control_axis(self.ax_split, "Dataset Split")
-        for label in self.radio_split.labels:
-            label.set_fontsize(10)
-            label.set_color("#332f26")
+        self._style_control_axis(self.ax_split, "Split")
+        self._style_radio_buttons(self.radio_split, label_size=6.9, marker_size=135)
 
         self.radio_category = RadioButtons(
             self.ax_category,
             CATEGORY_ORDER,
             active=CATEGORY_ORDER.index(self.category_name),
         )
-        self._style_control_axis(self.ax_category, "Trajectory Category")
-        for label in self.radio_category.labels:
-            label.set_fontsize(8.2)
-            label.set_color("#332f26")
+        self._style_control_axis(self.ax_category, "Category")
+        self._style_radio_buttons(self.radio_category, label_size=6.9)
 
+        metric_display_order = [FILTER_METRIC_DISPLAY[name] for name in FILTER_METRIC_ORDER]
         self.radio_metric = RadioButtons(
             self.ax_metric,
-            FILTER_METRIC_ORDER,
+            metric_display_order,
             active=FILTER_METRIC_ORDER.index(self.filter_metric_name),
         )
-        self._style_control_axis(self.ax_metric, "Numeric Filter Metric")
-        for label in self.radio_metric.labels:
-            label.set_fontsize(7.9)
-            label.set_color("#332f26")
+        self._style_control_axis(self.ax_metric, "Filter Metric")
+        self._style_radio_buttons(self.radio_metric, label_size=6.9)
+        self.metric_range_text = self.ax_metric.text(
+            0.03,
+            0.02,
+            "",
+            transform=self.ax_metric.transAxes,
+            fontsize=6.2,
+            color="#5b5345",
+            va="bottom",
+            ha="left",
+        )
 
-        self.slider_traj = Slider(self.ax_traj, "Trajectory in Filter", 0, max(len(self.filtered_indices) - 1, 0), valinit=0, valstep=1)
-        self.slider_speed = Slider(self.ax_speed, "Playback Speed", 0.25, 4.0, valinit=self.speed, valstep=0.25)
-        self.slider_frame = Slider(self.ax_frame, "Frame", 0, max(self.current.n_steps - 1, 0), valinit=0, valstep=1)
-        self.slider_filter_min = Slider(self.ax_filter_min, "Filter Min", 0.0, 1.0, valinit=0.0)
-        self.slider_filter_max = Slider(self.ax_filter_max, "Filter Max", 0.0, 1.0, valinit=1.0)
-        self.textbox_min = TextBox(self.ax_min_box, "Min", initial="")
-        self.textbox_max = TextBox(self.ax_max_box, "Max", initial="")
+        self.slider_traj = Slider(self.ax_traj, "", 0, max(len(self.filtered_indices) - 1, 0), valinit=0, valstep=1)
+        self.slider_speed = Slider(self.ax_speed, "", 0.25, 7.0, valinit=min(self.speed, 7.0), valstep=0.25)
+        self.slider_frame = Slider(self.ax_frame, "", 0, max(self.current.n_steps - 1, 0), valinit=0, valstep=1)
+        self.slider_filter_min = Slider(self.ax_filter_min, "", 0.0, 1.0, valinit=0.0)
+        self.slider_filter_max = Slider(self.ax_filter_max, "", 0.0, 1.0, valinit=1.0)
+        self.textbox_traj = TextBox(self.ax_traj_box, "Trajectory", initial="")
+        self.textbox_min = TextBox(self.ax_min_box, "Metric Min", initial="")
+        self.textbox_max = TextBox(self.ax_max_box, "Metric Max", initial="")
         self.button_play = Button(self.ax_play, "Play")
         self.button_reset = Button(self.ax_reset, "Reset")
         self.button_trace = Button(self.ax_trace, self.trace_mode)
+        self.button_extrema = Button(self.ax_extrema, self.extrema_mode)
+        self.button_errors = Button(self.ax_errors, self.error_metrics_mode)
+        self.button_instant_error = Button(self.ax_instant_error, self.instant_error_mode)
+        self.button_var_legend = Button(self.ax_var_legend, "Var Legend")
         self.button_tracer = Button(self.ax_tracer, self.tip_tracer_mode)
-        self.button_toggle_guide = Button(self.ax_toggle_guide, "Guide")
-        self.button_toggle_details = Button(self.ax_toggle_details, "Details")
-        self._style_slider(self.slider_frame)
-        self._style_slider(self.slider_traj)
-        self._style_slider(self.slider_speed)
-        self._style_slider(self.slider_filter_min)
-        self._style_slider(self.slider_filter_max)
+        self.button_input_arrows = Button(self.ax_input_arrows, self.input_arrows_mode)
+        self.button_output_arrows = Button(self.ax_output_arrows, self.output_arrows_mode)
+        self._style_slider(self.slider_frame, SLIDER_LABELS["frame"])
+        self._style_slider(self.slider_traj, SLIDER_LABELS["trajectory"])
+        self._style_slider(self.slider_speed, SLIDER_LABELS["speed"])
+        self._style_slider(self.slider_filter_min, SLIDER_LABELS["filter_min"])
+        self._style_slider(self.slider_filter_max, SLIDER_LABELS["filter_max"])
+        self._style_textbox(self.textbox_traj, label_size=7.0)
         self._style_button(self.button_play)
         self._style_button(self.button_reset)
         self._style_button(self.button_trace)
+        self._style_button(self.button_extrema)
+        self._style_button(self.button_errors)
+        self._style_button(self.button_instant_error)
+        self._style_button(self.button_var_legend)
         self._style_button(self.button_tracer)
-        self._style_button(self.button_toggle_guide)
-        self._style_button(self.button_toggle_details)
-        self._style_textbox(self.textbox_min)
-        self._style_textbox(self.textbox_max)
+        self._style_button(self.button_input_arrows)
+        self._style_button(self.button_output_arrows)
+        self._style_textbox(self.textbox_min, label_size=6.2)
+        self._style_textbox(self.textbox_max, label_size=6.2)
 
         self.radio_split.on_clicked(self._on_split_change)
         self.radio_category.on_clicked(self._on_category_change)
@@ -646,81 +855,228 @@ class WingTrajectoryAnimator:
         self.slider_frame.on_changed(self._on_frame_change)
         self.slider_filter_min.on_changed(self._on_filter_slider_change)
         self.slider_filter_max.on_changed(self._on_filter_slider_change)
+        self.textbox_traj.on_submit(self._on_traj_text_submit)
         self.textbox_min.on_submit(self._on_filter_text_submit)
         self.textbox_max.on_submit(self._on_filter_text_submit)
         self.button_play.on_clicked(self._toggle_pause)
         self.button_reset.on_clicked(self._reset_animation)
         self.button_trace.on_clicked(self._toggle_trace_mode)
+        self.button_extrema.on_clicked(self._toggle_extrema_mode)
+        self.button_errors.on_clicked(self._toggle_error_metrics_mode)
+        self.button_instant_error.on_clicked(self._toggle_instant_error_mode)
+        self.button_var_legend.on_clicked(self._show_variable_legend)
         self.button_tracer.on_clicked(self._toggle_tracer_mode)
-        self.button_toggle_guide.on_clicked(self._toggle_guide)
-        self.button_toggle_details.on_clicked(self._toggle_details)
+        self.button_input_arrows.on_clicked(self._toggle_input_arrows_mode)
+        self.button_output_arrows.on_clicked(self._toggle_output_arrows_mode)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key_press)
         self._reset_metric_filter_controls()
         self._refresh_info_panel()
 
     def _style_control_axis(self, ax, title: str) -> None:
         ax.set_facecolor("#fffdf8")
-        ax.set_title(title, fontsize=10, pad=8, fontweight="bold")
+        ax.set_title(title, fontsize=8.7, pad=4, fontweight="bold")
+        ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
         for spine in ax.spines.values():
             spine.set_edgecolor("#d8d2c2")
 
-    def _style_slider(self, slider: Slider) -> None:
+    def _style_radio_buttons(self, radio: RadioButtons, label_size: float, marker_size: float = 120.0) -> None:
+        for label in radio.labels:
+            label.set_fontsize(label_size)
+            label.set_color("#332f26")
+
+        if hasattr(radio, "_buttons"):
+            radio._buttons.set_sizes([marker_size] * len(radio.labels))
+            radio._buttons.set_linewidths([1.0] * len(radio.labels))
+            radio._buttons.set_edgecolors(["#1f1f1f"] * len(radio.labels))
+            radio._buttons.set_zorder(3)
+
+        if hasattr(radio, "activecolor"):
+            radio.activecolor = "#1a1aff"
+
+    def _style_slider(self, slider: Slider, title: str) -> None:
         slider.ax.set_facecolor("#fffdf8")
         if hasattr(slider, "track"):
             slider.track.set_color("#ddd6c4")
         if hasattr(slider, "poly"):
             slider.poly.set_facecolor("#5e8b7e")
-        slider.label.set_color("#332f26")
+        slider.label.set_text("")
         slider.valtext.set_color("#332f26")
+        slider.valtext.set_fontsize(7.8)
+        slider.valtext.set_horizontalalignment("right")
+        slider.valtext.set_x(0.9)
+        slider.ax.set_title(title, fontsize=7.9, pad=1, loc="left", color="#332f26", fontweight="bold")
 
     def _style_button(self, button: Button) -> None:
         button.ax.set_facecolor("#fffdf8")
         button.color = "#fffdf8"
         button.hovercolor = "#efe7d6"
         button.label.set_color("#332f26")
-        button.label.set_fontsize(9.5)
+        button.label.set_fontsize(9.0)
         for spine in button.ax.spines.values():
             spine.set_edgecolor("#d8d2c2")
 
-    def _style_textbox(self, textbox: TextBox) -> None:
+    def _style_textbox(self, textbox: TextBox, label_size: float = 8.1) -> None:
         textbox.ax.set_facecolor("#fffdf8")
-        textbox.label.set_color("#332f26")
+        title = textbox.label.get_text()
+        textbox.label.set_text("")
         textbox.text_disp.set_color("#332f26")
+        textbox.text_disp.set_fontsize(8.0)
+        textbox.ax.set_title(title, fontsize=label_size, pad=1, loc="center", color="#332f26", fontweight="bold")
         for spine in textbox.ax.spines.values():
             spine.set_edgecolor("#d8d2c2")
 
+    def _update_metric_range_text(self) -> None:
+        values = self._get_active_metric_values()
+        vmin = float(np.min(values))
+        vmax = float(np.max(values))
+        self.metric_range_text.set_text(f"available range: {vmin:.3f} to {vmax:.3f}")
+
     def _build_variable_legend_text(self) -> str:
         lines = [
-            "3D scale",
-            "axes use normalized wing geometry",
-            f"span      = {SPAN_LENGTH:.2f} units",
-            f"chord     = {CHORD_LENGTH:.2f} units",
-            "numbers show relative position only",
-            "they do not represent meters unless",
-            "you calibrate the wing dimensions",
+            "Positions / wing kinematics",
+            "stroke    : sweep angle in the wing frame",
+            "deviation : out-of-plane angle in the wing frame",
+            "rotation  : wing pitch angle",
             "",
-            "Why it matters",
-            "use the 3D axes to compare shape,",
-            "orientation, and tip paths between",
-            "trajectories rather than exact size",
-            "",
-            "3D axes",
-            f"x         : {AXIS_LABELS['x']}",
-            f"y         : {AXIS_LABELS['y']}",
-            f"z         : {AXIS_LABELS['z']}",
-            "",
-            "Category rules",
+            "Input variables",
         ]
-        for name in CATEGORY_ORDER:
-            lines.append(f"{name:10s}: {CATEGORY_RULES[name]}")
+        for name in INPUT_VARIABLE_NAMES:
+            lines.append(f"{name:<10}: {INPUT_VARIABLE_DESCRIPTIONS[name]}")
         lines.extend([
             "",
-            "Refined filter",
-            "choose a metric, then set",
-            "min/max bounds to keep only",
-            "trajectories inside that range",
+            "Output variables",
+        ])
+        for name in OUTPUT_VARIABLE_NAMES:
+            lines.append(f"{name:<10}: {OUTPUT_VARIABLE_DESCRIPTIONS[name]}")
+        lines.extend([
+            "",
+            "Plot overlays",
+            "True min/max : minimum or maximum of measured data",
+            "Pred min/max : minimum or maximum of predicted data",
+            "Errors ON    : overall trajectory RMSE and R^2 on each plot",
+            "Inst Error ON: live pred-true value on each plot",
+            "",
+            "3D arrow overlays",
+            "Input Arrows : current measured input values in the wing frame",
+            "Output Arrows: current measured output values in the wing frame",
+            "Arrow length : proportional to the current value, scaled by",
+            "               that trajectory's own variable range",
+            "Arrow popup  : choose which input/output variables appear",
+            "",
+            "3D axes",
+            "x_w       : stroke axis",
+            "y_w       : deviation axis",
+            "z_w       : span axis",
+            "",
+            "Scale note",
+            f"span = {SPAN_LENGTH:.2f} units, chord = {CHORD_LENGTH:.2f} units",
+            "Cycle time [-] is normalized cycle fraction from 0 to 1.",
         ])
         return "\n".join(lines)
+
+    def _show_variable_legend(self, _event) -> None:
+        if self.legend_popup_fig is not None and plt.fignum_exists(self.legend_popup_fig.number):
+            self.legend_popup_fig.canvas.draw_idle()
+            return
+
+        popup = plt.figure(figsize=(6.4, 7.2), facecolor="#f4f1ea")
+        try:
+            popup.canvas.manager.set_window_title("Variable Meanings")
+        except Exception:
+            pass
+
+        ax = popup.add_axes([0.07, 0.06, 0.86, 0.88])
+        ax.axis("off")
+        ax.set_facecolor("#fffdf8")
+        ax.text(
+            0.0,
+            1.0,
+            self._build_variable_legend_text(),
+            va="top",
+            ha="left",
+            fontsize=10.0,
+            family="monospace",
+            linespacing=1.25,
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="#fffdf8", edgecolor="#d8d2c2"),
+        )
+        self.legend_popup_fig = popup
+        popup.show()
+
+    def _show_arrow_selector_popup(self, kind: str) -> None:
+        if kind == "input":
+            fig_attr = "input_selector_popup_fig"
+            checks_attr = "input_selector_checks"
+            title = "Input Arrow Selection"
+            names = INPUT_VARIABLE_NAMES
+            descriptions = INPUT_VARIABLE_DESCRIPTIONS
+            selected = self.selected_input_arrow_vars
+            on_toggle = self._on_input_arrow_selector_toggle
+        else:
+            fig_attr = "output_selector_popup_fig"
+            checks_attr = "output_selector_checks"
+            title = "Output Arrow Selection"
+            names = OUTPUT_VARIABLE_NAMES
+            descriptions = OUTPUT_VARIABLE_DESCRIPTIONS
+            selected = self.selected_output_arrow_vars
+            on_toggle = self._on_output_arrow_selector_toggle
+
+        popup = getattr(self, fig_attr)
+        if popup is not None and plt.fignum_exists(popup.number):
+            popup.canvas.draw_idle()
+            return
+
+        popup = plt.figure(figsize=(3.8, 4.6), facecolor="#f4f1ea")
+        try:
+            popup.canvas.manager.set_window_title(title)
+        except Exception:
+            pass
+
+        ax = popup.add_axes([0.10, 0.08, 0.82, 0.84])
+        ax.set_facecolor("#fffdf8")
+        labels = [f"{name} ({descriptions[name]})" for name in names]
+        checks = CheckButtons(ax, labels, [name in selected for name in names])
+
+        for label in checks.labels:
+            label.set_fontsize(8.2)
+            label.set_color("#332f26")
+        for line_group in checks.lines:
+            for line in line_group:
+                line.set_color("#1a1aff")
+                line.set_linewidth(1.2)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#d8d2c2")
+        ax.set_title(title, fontsize=10.0, fontweight="bold", pad=6)
+        ax.text(
+            0.02,
+            0.98,
+            "Checked variables are shown on the 3D graph.",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=7.6,
+            color="#5b5345",
+        )
+
+        checks.on_clicked(on_toggle)
+        setattr(self, fig_attr, popup)
+        setattr(self, checks_attr, checks)
+        popup.show()
+
+    def _on_input_arrow_selector_toggle(self, label: str) -> None:
+        name = label.split(" (", 1)[0]
+        if name in self.selected_input_arrow_vars:
+            self.selected_input_arrow_vars.remove(name)
+        else:
+            self.selected_input_arrow_vars.add(name)
+        self._update_frame(self.frame_idx)
+
+    def _on_output_arrow_selector_toggle(self, label: str) -> None:
+        name = label.split(" (", 1)[0]
+        if name in self.selected_output_arrow_vars:
+            self.selected_output_arrow_vars.remove(name)
+        else:
+            self.selected_output_arrow_vars.add(name)
+        self._update_frame(self.frame_idx)
 
     def _on_split_change(self, label: str) -> None:
         self.split = label
@@ -752,6 +1108,31 @@ class WingTrajectoryAnimator:
         self.last_slider_frame = frame
         self._update_frame(frame)
 
+    def _on_traj_text_submit(self, text: str) -> None:
+        try:
+            traj_index = int(float(text.strip()))
+        except ValueError:
+            return
+
+        traj_index = int(np.clip(traj_index, 0, self.current.n_traj - 1))
+        if len(self.filtered_indices) == 0:
+            self.filtered_indices = np.array([traj_index], dtype=int)
+            slider_index = 0
+        elif traj_index in set(self.filtered_indices.tolist()):
+            slider_index = int(np.where(self.filtered_indices == traj_index)[0][0])
+        else:
+            self.filtered_indices = np.array([traj_index], dtype=int)
+            slider_index = 0
+            self.slider_traj.valmax = 0
+            self.slider_traj.ax.set_xlim(self.slider_traj.valmin, max(self.slider_traj.valmax, 0))
+
+        self.slider_traj.eventson = False
+        self.slider_traj.set_val(slider_index)
+        self.slider_traj.eventson = True
+        self.traj_index = traj_index
+        self._load_trajectory(traj_index)
+        self._update_frame(0)
+
     def _get_active_metric_values(self) -> np.ndarray:
         return self.current.filter_metrics[self.filter_metric_name]
 
@@ -761,6 +1142,7 @@ class WingTrajectoryAnimator:
         vmax = float(np.max(values))
         if np.isclose(vmin, vmax):
             vmax = vmin + 1.0
+        self._update_metric_range_text()
         self.filter_min = vmin
         self.filter_max = vmax
 
@@ -777,7 +1159,12 @@ class WingTrajectoryAnimator:
         self._apply_filters(keep_current=True)
 
     def _on_metric_change(self, label: str) -> None:
-        self.filter_metric_name = label
+        for metric_name, display_name in FILTER_METRIC_DISPLAY.items():
+            if label == display_name:
+                self.filter_metric_name = metric_name
+                break
+        else:
+            self.filter_metric_name = label
         self._reset_metric_filter_controls()
 
     def _on_filter_slider_change(self, _value: float) -> None:
@@ -822,34 +1209,47 @@ class WingTrajectoryAnimator:
         self.button_play.label.set_text("Play" if self.paused else "Pause")
 
     def _toggle_trace_mode(self, _event) -> None:
-        self.trace_mode = "Live traces" if self.trace_mode == "Full traces" else "Full traces"
+        self.trace_mode = "2D Live Traces" if self.trace_mode == "2D Full Traces" else "2D Full Traces"
         self.button_trace.label.set_text(self.trace_mode)
         self._update_frame(self.frame_idx)
 
+    def _toggle_extrema_mode(self, _event) -> None:
+        self.extrema_mode = "Extrema ON" if self.extrema_mode == "Extrema OFF" else "Extrema OFF"
+        self.button_extrema.label.set_text(self.extrema_mode)
+        self._update_frame(self.frame_idx)
+
+    def _toggle_error_metrics_mode(self, _event) -> None:
+        self.error_metrics_mode = "Errors ON" if self.error_metrics_mode == "Errors OFF" else "Errors OFF"
+        self.button_errors.label.set_text(self.error_metrics_mode)
+        self._update_frame(self.frame_idx)
+
+    def _toggle_instant_error_mode(self, _event) -> None:
+        self.instant_error_mode = "Inst Error ON" if self.instant_error_mode == "Inst Error OFF" else "Inst Error OFF"
+        self.button_instant_error.label.set_text(self.instant_error_mode)
+        self._update_frame(self.frame_idx)
+
+    def _toggle_input_arrows_mode(self, _event) -> None:
+        self.input_arrows_mode = "Input Arrows ON" if self.input_arrows_mode == "Input Arrows OFF" else "Input Arrows OFF"
+        self.button_input_arrows.label.set_text(self.input_arrows_mode)
+        if self.input_arrows_mode == "Input Arrows ON":
+            self._show_arrow_selector_popup("input")
+        self._update_frame(self.frame_idx)
+
+    def _toggle_output_arrows_mode(self, _event) -> None:
+        self.output_arrows_mode = "Output Arrows ON" if self.output_arrows_mode == "Output Arrows OFF" else "Output Arrows OFF"
+        self.button_output_arrows.label.set_text(self.output_arrows_mode)
+        if self.output_arrows_mode == "Output Arrows ON":
+            self._show_arrow_selector_popup("output")
+        self._update_frame(self.frame_idx)
+
     def _toggle_tracer_mode(self, _event) -> None:
-        self.tip_tracer_mode = "Tracer OFF" if self.tip_tracer_mode == "Tracer ON" else "Tracer ON"
+        self.tip_tracer_mode = "3D Tip Tracer OFF" if self.tip_tracer_mode == "3D Tip Tracer ON" else "3D Tip Tracer ON"
         self.button_tracer.label.set_text(self.tip_tracer_mode)
         self._update_frame(self.frame_idx)
 
-    def _toggle_guide(self, _event) -> None:
-        self.info_mode = "Guide"
-        self._refresh_info_panel()
-
-    def _toggle_details(self, _event) -> None:
-        self.info_mode = "Details"
-        self._refresh_info_panel()
-
     def _refresh_info_panel(self) -> None:
-        if self.info_mode == "Guide":
-            self.ax_info.set_title("Guide", fontsize=11, fontweight="bold", pad=10)
-            self.info_text.set_text(self._build_variable_legend_text())
-            self.button_toggle_guide.color = "#efe7d6"
-            self.button_toggle_details.color = "#fffdf8"
-        else:
-            self.ax_info.set_title("Selection Details", fontsize=11, fontweight="bold", pad=10)
-            self.info_text.set_text(self._format_info_text(self.frame_idx))
-            self.button_toggle_guide.color = "#fffdf8"
-            self.button_toggle_details.color = "#efe7d6"
+        self.ax_details.set_title("Selection Details", fontsize=11, fontweight="bold", pad=8)
+        self.info_text.set_text(self._format_info_text(self.frame_idx))
         self.fig.canvas.draw_idle()
 
     def _cycle_category(self, _event) -> None:
@@ -876,7 +1276,6 @@ class WingTrajectoryAnimator:
         self._update_frame(0)
 
     def _refresh_filtered_trajectory(self, keep_current: bool) -> None:
-        
         if keep_current and self.traj_index in set(self.filtered_indices.tolist()):
             slider_index = int(np.where(self.filtered_indices == self.traj_index)[0][0])
         else:
@@ -888,6 +1287,7 @@ class WingTrajectoryAnimator:
         self.slider_traj.eventson = False
         self.slider_traj.set_val(slider_index)
         self.slider_traj.eventson = True
+        self.textbox_traj.set_val(str(self.traj_index))
 
     def _reset_animation(self, _event) -> None:
         self.paused = True
@@ -902,12 +1302,18 @@ class WingTrajectoryAnimator:
             self._toggle_pause(None)
         elif event.key == "t":
             self._toggle_trace_mode(None)
+        elif event.key == "m":
+            self._toggle_extrema_mode(None)
+        elif event.key == "e":
+            self._toggle_error_metrics_mode(None)
+        elif event.key == "i":
+            self._toggle_instant_error_mode(None)
+        elif event.key == "u":
+            self._toggle_input_arrows_mode(None)
+        elif event.key == "o":
+            self._toggle_output_arrows_mode(None)
         elif event.key == "r":
             self._toggle_tracer_mode(None)
-        elif event.key == "g":
-            self._toggle_guide(None)
-        elif event.key == "d":
-            self._toggle_details(None)
         elif event.key == "c":
             self._cycle_category(None)
         elif event.key == "right":
@@ -935,6 +1341,15 @@ class WingTrajectoryAnimator:
         self.trajectory_leading = np.array([item[1] for item in geometry])
         self.trajectory_trailing = np.array([item[2] for item in geometry])
         self.trajectory_tip = 0.5 * (self.trajectory_leading + self.trajectory_trailing)
+        self.scene_lim = 0.8
+        self.input_scale_refs = {
+            name: max(float(np.max(np.abs(self.trajectory_inputs[:, idx]))), 1e-6)
+            for idx, name in enumerate(INPUT_VARIABLE_NAMES)
+        }
+        self.output_scale_refs = {
+            name: max(float(np.max(np.abs(self.trajectory_truth[:, idx]))), 1e-6)
+            for idx, name in enumerate(OUTPUT_VARIABLE_NAMES)
+        }
 
         for i, ax in enumerate(self.output_axes):
             truth_series = self.trajectory_truth[:, i]
@@ -946,12 +1361,182 @@ class WingTrajectoryAnimator:
             pad = 0.08 * (ymax - ymin) if ymax > ymin else 1.0
             ax.set_ylim(ymin - pad, ymax + pad)
 
+            span = (ymax + pad) - (ymin - pad)
+            text_dx = 0.012
+            text_dy = 0.04 * span
+
+            truth_max_idx = int(np.argmax(truth_series))
+            truth_min_idx = int(np.argmin(truth_series))
+            pred_max_idx = int(np.argmax(pred_series))
+            pred_min_idx = int(np.argmin(pred_series))
+
+            extrema_points = [
+                (self.time_axis[truth_max_idx], truth_series[truth_max_idx], f"True max {truth_series[truth_max_idx]:.3f}", text_dx, text_dy),
+                (self.time_axis[truth_min_idx], truth_series[truth_min_idx], f"True min {truth_series[truth_min_idx]:.3f}", text_dx, -text_dy),
+                (self.time_axis[pred_max_idx], pred_series[pred_max_idx], f"Pred max {pred_series[pred_max_idx]:.3f}", -text_dx, text_dy),
+                (self.time_axis[pred_min_idx], pred_series[pred_min_idx], f"Pred min {pred_series[pred_min_idx]:.3f}", -text_dx, -text_dy),
+            ]
+
+            for marker, text, (xv, yv, label, dx, dy) in zip(
+                self.extrema_markers[i],
+                self.extrema_texts[i],
+                extrema_points,
+            ):
+                marker.set_data([xv], [yv])
+                text.set_position((np.clip(xv + dx, 0.0, 1.0), yv + dy))
+                text.set_text(label)
+
+            rmse = compute_rmse(truth_series, pred_series)
+            r2 = compute_r2(truth_series, pred_series)
+            self.metric_texts[i].set_text(f"RMSE {rmse:.3f}\nR$^2$ {r2:.3f}")
+
         all_points = np.vstack([self.trajectory_hinge, self.trajectory_leading, self.trajectory_trailing])
         lim = np.max(np.abs(all_points)) * 1.15
         lim = max(lim, 0.8)
+        self.scene_lim = lim
         self.ax3d.set_xlim(-lim, lim)
         self.ax3d.set_ylim(-lim, lim)
         self.ax3d.set_zlim(-lim, lim)
+
+    def _clear_3d_arrow_artists(self, artists: List) -> None:
+        while artists:
+            artist = artists.pop()
+            try:
+                artist.remove()
+            except Exception:
+                pass
+
+    def _add_3d_arrow(self, container: List, origin: np.ndarray, vector: np.ndarray, color: str, label: str) -> None:
+        norm = float(np.linalg.norm(vector))
+        if norm < 1e-9:
+            return
+        quiver = self.ax3d.quiver(
+            origin[0], origin[1], origin[2],
+            vector[0], vector[1], vector[2],
+            color=color,
+            linewidth=2.0,
+            arrow_length_ratio=0.18,
+        )
+        text = self.ax3d.text(
+            origin[0] + vector[0],
+            origin[1] + vector[1],
+            origin[2] + vector[2],
+            label,
+            color=color,
+            fontsize=7.0,
+        )
+        container.extend([quiver, text])
+
+    def _draw_input_arrows(self, frame: int, hinge: np.ndarray, wing_tip: np.ndarray, leading: np.ndarray, trailing: np.ndarray) -> None:
+        self._clear_3d_arrow_artists(self.input_arrow_artists)
+        if self.input_arrows_mode != "Input Arrows ON":
+            return
+
+        base = 0.45 * self.scene_lim
+        inputs = self.trajectory_inputs[frame]
+        chord_dir = normalize_vector(leading - trailing)
+        span_dir = normalize_vector(wing_tip - hinge)
+        normal_dir = normalize_vector(np.cross(span_dir, chord_dir))
+        prev_idx = max(frame - 1, 0)
+        next_idx = min(frame + 1, self.current.n_steps - 1)
+        vel_dir = normalize_vector(self.trajectory_tip[next_idx] - self.trajectory_tip[prev_idx])
+        if np.linalg.norm(vel_dir) < 1e-9:
+            vel_dir = np.array([1.0, 0.0, 0.0])
+
+        axis_dirs = {
+            "a_x": np.array([1.0, 0.0, 0.0]),
+            "a_y": np.array([0.0, 1.0, 0.0]),
+            "a_z": np.array([0.0, 0.0, 1.0]),
+            "alpha_dot": np.array([0.0, 0.0, 1.0]),
+            "alpha_ddot": np.array([0.0, 0.0, 1.0]),
+        }
+
+        for name in ("a_x", "a_y", "a_z"):
+            if name not in self.selected_input_arrow_vars:
+                continue
+            value = inputs[INPUT_INDEX[name]]
+            length = base * (value / self.input_scale_refs[name])
+            self._add_3d_arrow(
+                self.input_arrow_artists,
+                hinge,
+                axis_dirs[name] * length,
+                INPUT_ARROW_COLORS[name],
+                f"{name} {value:.2f}",
+            )
+
+        if "AoA" in self.selected_input_arrow_vars:
+            aoa_val = inputs[INPUT_INDEX["AoA"]]
+            self._add_3d_arrow(
+                self.input_arrow_artists,
+                wing_tip,
+                normal_dir * base * (aoa_val / self.input_scale_refs["AoA"]),
+                INPUT_ARROW_COLORS["AoA"],
+                f"AoA {aoa_val:.2f}",
+            )
+        if "|v|" in self.selected_input_arrow_vars:
+            vel_val = inputs[INPUT_INDEX["|v|"]]
+            self._add_3d_arrow(
+                self.input_arrow_artists,
+                wing_tip,
+                vel_dir * base * (vel_val / self.input_scale_refs["|v|"]),
+                INPUT_ARROW_COLORS["|v|"],
+                f"|v| {vel_val:.2f}",
+            )
+        for name, origin in (("alpha_dot", trailing), ("alpha_ddot", leading)):
+            if name not in self.selected_input_arrow_vars:
+                continue
+            value = inputs[INPUT_INDEX[name]]
+            length = base * (value / self.input_scale_refs[name])
+            self._add_3d_arrow(
+                self.input_arrow_artists,
+                origin,
+                axis_dirs[name] * length,
+                INPUT_ARROW_COLORS[name],
+                f"{name} {value:.2f}",
+            )
+
+    def _draw_output_arrows(self, frame: int, hinge: np.ndarray, wing_tip: np.ndarray) -> None:
+        self._clear_3d_arrow_artists(self.output_arrow_artists)
+        if self.output_arrows_mode != "Output Arrows ON":
+            return
+
+        base = 0.45 * self.scene_lim
+        outputs = self.trajectory_truth[frame]
+        force_axes = {
+            "CF_x": np.array([1.0, 0.0, 0.0]),
+            "CF_y": np.array([0.0, 1.0, 0.0]),
+        }
+        moment_axes = {
+            "CM_x": np.array([1.0, 0.0, 0.0]),
+            "CM_y": np.array([0.0, 1.0, 0.0]),
+            "CM_z": np.array([0.0, 0.0, 1.0]),
+        }
+
+        for name, axis in force_axes.items():
+            if name not in self.selected_output_arrow_vars:
+                continue
+            value = outputs[OUTPUT_INDEX[name]]
+            length = base * (value / self.output_scale_refs[name])
+            self._add_3d_arrow(
+                self.output_arrow_artists,
+                wing_tip,
+                axis * length,
+                OUTPUT_ARROW_COLORS[name],
+                f"{name} {value:.2f}",
+            )
+
+        for name, axis in moment_axes.items():
+            if name not in self.selected_output_arrow_vars:
+                continue
+            value = outputs[OUTPUT_INDEX[name]]
+            length = base * (value / self.output_scale_refs[name])
+            self._add_3d_arrow(
+                self.output_arrow_artists,
+                hinge,
+                axis * length,
+                OUTPUT_ARROW_COLORS[name],
+                f"{name} {value:.2f}",
+            )
 
     def _format_info_text(self, frame: int) -> str:
         inputs = self.trajectory_inputs[frame]
@@ -959,10 +1544,12 @@ class WingTrajectoryAnimator:
         lines = [
             f"Trajectory: {self.traj_index}",
             f"Frame     : {frame + 1}/{self.current.n_steps}",
+            f"Split     : {self.split}",
             "",
             f"Category  : {self.category_name}",
-            "",
+            f"Rule      : {CATEGORY_RULES[self.category_name]}",
             f"Filter    : {self.filter_metric_name}",
+            f"Meaning   : {FILTER_METRIC_RULES[self.filter_metric_name]}",
             f"Range     : {self.filter_min:.4f} to {self.filter_max:.4f}",
             "",
             "Summary",
@@ -970,12 +1557,25 @@ class WingTrajectoryAnimator:
             "",
             "Kinematics",
         ]
-        for name, value in zip(POSITION_NAMES, pos):
-            lines.append(f"{name:10s}: {np.degrees(value):8.2f} deg")
+        kin_parts = [
+            f"{name[:5]}={np.degrees(value):6.1f} deg"
+            for name, value in zip(POSITION_NAMES, pos)
+        ]
+        lines.append(" | ".join(kin_parts))
         lines.append("")
         lines.append("Inputs")
-        for name, value in zip(INPUT_VARIABLE_NAMES, inputs):
-            lines.append(f"{name:10s}: {value:8.4f}")
+        input_parts = [f"{name}={value:6.3f}" for name, value in zip(INPUT_VARIABLE_NAMES, inputs)]
+        lines.append(" | ".join(input_parts[:3]))
+        lines.append(" | ".join(input_parts[3:5]))
+        lines.append(" | ".join(input_parts[5:]))
+        lines.append("")
+        lines.append("Instant error (pred-true)")
+        err_parts = [
+            f"{name}={self.trajectory_pred[frame, i] - self.trajectory_truth[frame, i]:6.3f}"
+            for i, name in enumerate(OUTPUT_VARIABLE_NAMES)
+        ]
+        lines.append(" | ".join(err_parts[:3]))
+        lines.append(" | ".join(err_parts[3:]))
         return "\n".join(lines)
 
     def _update_frame(self, frame: int) -> List:
@@ -999,7 +1599,7 @@ class WingTrajectoryAnimator:
         self.trailing_edge.set_3d_properties([wing_tip[2], trailing[2]])
         self.stroke_history.set_data(leading_history[:, 0], leading_history[:, 1])
         self.stroke_history.set_3d_properties(leading_history[:, 2])
-        if self.tip_tracer_mode == "Tracer ON":
+        if self.tip_tracer_mode == "3D Tip Tracer ON":
             self.leading_tip_trace.set_data(leading_history[:, 0], leading_history[:, 1])
             self.leading_tip_trace.set_3d_properties(leading_history[:, 2])
             self.trailing_tip_trace.set_data(trailing_history[:, 0], trailing_history[:, 1])
@@ -1018,18 +1618,19 @@ class WingTrajectoryAnimator:
             self.trailing_tip_marker.set_data([], [])
             self.trailing_tip_marker.set_3d_properties([])
         self.wing_patch.set_verts([[hinge, leading, trailing]])
+        self._draw_input_arrows(self.frame_idx, hinge, wing_tip, leading, trailing)
+        self._draw_output_arrows(self.frame_idx, hinge, wing_tip)
 
         current_time_sec = self.frame_idx * self.playback_dt
-        self.status_text.set_text(
-            f"time = {current_time_sec:0.3f} s\n"
-            f"speed = {self.speed:0.2f}x\n"
-            f"state = {'paused' if self.paused else 'playing'}\n"
-            f"split = {self.split} (train=fit, test=held-out)\n"
-            f"category = {self.category_name}\n"
-            f"mat file = {self.mat_file.name}"
+        self.header_text.set_text(
+            f"{'Paused' if self.paused else 'Playing'} | "
+            f"time {current_time_sec:0.3f} s | "
+            f"speed {self.speed:0.2f}x | "
+            f"split {self.split} | "
+            f"category {self.category_name} | "
+            f"{self.mat_file.name}"
         )
-        if self.info_mode == "Details":
-            self.info_text.set_text(self._format_info_text(self.frame_idx))
+        self.info_text.set_text(self._format_info_text(self.frame_idx))
 
         artists: List = [
             self.hinge_trace,
@@ -1042,11 +1643,13 @@ class WingTrajectoryAnimator:
             self.leading_tip_marker,
             self.trailing_tip_marker,
             self.wing_patch,
-            self.status_text,
+            self.header_text,
             self.info_text,
         ]
+        artists.extend(self.input_arrow_artists)
+        artists.extend(self.output_arrow_artists)
         for i in range(len(OUTPUT_VARIABLE_NAMES)):
-            if self.trace_mode == "Live traces":
+            if self.trace_mode == "2D Live Traces":
                 line_slice = slice(0, self.frame_idx + 1)
                 self.truth_lines[i].set_data(self.time_axis[line_slice], self.trajectory_truth[line_slice, i])
                 self.pred_lines[i].set_data(self.time_axis[line_slice], self.trajectory_pred[line_slice, i])
@@ -1055,16 +1658,28 @@ class WingTrajectoryAnimator:
                 self.pred_lines[i].set_data(self.time_axis, self.trajectory_pred[:, i])
             truth_value = self.trajectory_truth[self.frame_idx, i]
             pred_value = self.trajectory_pred[self.frame_idx, i]
+            inst_error = pred_value - truth_value
             self.cursor_lines[i].set_xdata([t, t])
             self.actual_markers[i].set_data([t], [truth_value])
             self.pred_markers[i].set_data([t], [pred_value])
+            self.metric_texts[i].set_visible(self.error_metrics_mode == "Errors ON")
+            self.instant_error_texts[i].set_text(f"pred-true {inst_error:.3f}")
+            self.instant_error_texts[i].set_visible(self.instant_error_mode == "Inst Error ON")
+            show_extrema = self.extrema_mode == "Extrema ON"
+            for marker, text in zip(self.extrema_markers[i], self.extrema_texts[i]):
+                marker.set_visible(show_extrema)
+                text.set_visible(show_extrema)
             artists.extend([
                 self.truth_lines[i],
                 self.pred_lines[i],
                 self.cursor_lines[i],
                 self.actual_markers[i],
                 self.pred_markers[i],
+                self.metric_texts[i],
+                self.instant_error_texts[i],
             ])
+            artists.extend(self.extrema_markers[i])
+            artists.extend(self.extrema_texts[i])
 
         return artists
 
@@ -1087,17 +1702,6 @@ class WingTrajectoryAnimator:
             blit=False,
             cache_frame_data=False,
         )
-        manager = plt.get_current_fig_manager()
-        try:
-            manager.window.state("zoomed")
-        except Exception:
-            try:
-                manager.window.showMaximized()
-            except Exception:
-                try:
-                    manager.full_screen_toggle()
-                except Exception:
-                    pass
         plt.show()
 
 
@@ -1107,7 +1711,7 @@ def parse_args() -> argparse.Namespace:
         "--out-dir",
         type=str,
         default=None,
-        help="Full path to a model output folder containing matfiles/predict_train_n_test.mat.",
+        help="Full path to a model output folder containing usable MAT files in matfiles.",
     )
     parser.add_argument(
         "--out-folder-name",
@@ -1124,7 +1728,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--list-output-folders",
         action="store_true",
-        help="List available output folders that contain predict_train_n_test.mat and exit.",
+        help="List available output folders that contain usable MAT files and exit.",
     )
     parser.add_argument("--split", choices=["train", "test"], default="test")
     parser.add_argument("--trajectory", type=int, default=0, help="Zero-based trajectory index.")
