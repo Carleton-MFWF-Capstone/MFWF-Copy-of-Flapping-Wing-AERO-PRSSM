@@ -10,11 +10,6 @@ The PR-SSM code will generate the new model logs and the data files in the *../D
 
 The results and the model logs for the model used in the manuscript can be found in the *../Data/Output/20_08_15_IN_LK7Normalized_OUT_FMwoFa5_Dimx12_Epochs1000_512Train/* directory. To perform the postprocessing code provided in *../Matlab_Postprocess/* path, the output data set **predict_train_n_test.mat** should be stored in the *../matfiles/* output directory.
 
-## Purpose of Script
-diff --git a/c:\Files from USB\Carleton Year 5\MAAE 4907-N (Capstone Project - Micro Flapping-Wing Flyer (MFWF))\Neural Network (Fall 2025 - Winter 2026)\MFWF-Copy-of-Flapping-Wing-AERO-PRSSM\README.md b/c:\Files from USB\Carleton Year 5\MAAE 4907-N (Capstone Project - Micro Flapping-Wing Flyer (MFWF))\Neural Network (Fall 2025 - Winter 2026)\MFWF-Copy-of-Flapping-Wing-AERO-PRSSM\README.md
---- a/c:\Files from USB\Carleton Year 5\MAAE 4907-N (Capstone Project - Micro Flapping-Wing Flyer (MFWF))\Neural Network (Fall 2025 - Winter 2026)\MFWF-Copy-of-Flapping-Wing-AERO-PRSSM\README.md
-+++ b/c:\Files from USB\Carleton Year 5\MAAE 4907-N (Capstone Project - Micro Flapping-Wing Flyer (MFWF))\Neural Network (Fall 2025 - Winter 2026)\MFWF-Copy-of-Flapping-Wing-AERO-PRSSM\README.md
-@@ -13,14 +13,20 @@
  ## Purpose of Script
 -[Python_PRSSM/DataInformed.py](Python_PRSSM/DataInformed.py): Main run script that sets the training configuration, builds the dataset/model/output objects, launches training, and runs postprocessing.
 -[Python_PRSSM/outputs/optimize_hyperparameters_from_comparison.py](Python_PRSSM/outputs/optimize_hyperparameters_from_comparison.py): Reads the Excel comparison table and recommends new hyperparameter settings by balancing predicted accuracy against training-classification risk.
