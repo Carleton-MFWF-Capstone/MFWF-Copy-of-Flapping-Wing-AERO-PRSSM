@@ -103,8 +103,19 @@ class PRSSM(BaseModel):
             kl_reg = tf.reduce_sum(kl_div)
             elbo = log_lik - kl_reg
             self.loss = tf.negative(elbo)
-            optimizer = tf.train.AdamOptimizer(learning_rate=self.config['learning_rate'])
-            self.train = optimizer.minimize(self.loss, colocate_gradients_with_ops=True)
+
+            # Fixed learning rate. Exponential decay is intentionally disabled.
+            # decay_steps = self.config.get('learning_rate_decay_steps', 1000)
+            # decay_rate = self.config.get('learning_rate_decay_rate', 0.96)
+            # staircase = self.config.get('learning_rate_decay_staircase', True)
+            self.global_step = tf.Variable(0, trainable=False, name='global_step')
+            self.learning_rate = tf.constant(self.config['learning_rate'], dtype=tf.float64)
+            optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
+            self.train = optimizer.minimize(
+                self.loss,
+                global_step=self.global_step,
+                colocate_gradients_with_ops=True
+            )
             self.saver = tf.train.Saver()
             self.init = tf.global_variables_initializer()
 
@@ -156,9 +167,9 @@ class PRSSM(BaseModel):
             sample_uy = sample_uy[:, :recog_len, :]
             sample_uy = tf.cast(sample_uy, tf.float32)
 
-            layer1 = tf.layers.conv1d(sample_uy, 5, 3, activation=tf.nn.relu)
-            pool1 = tf.layers.max_pooling1d(layer1, 2, 2)
-            out1 = tf.reshape(pool1, [self.batch_tf, 35])
+            layer1 = tf.layers.conv1d(sample_uy, 5, 3, activation=tf.nn.tanh)  # 5 filters, kernel size 3
+            pool1 = tf.layers.max_pooling1d(layer1, 5, 3)  # pool size 2, stride 2
+            out1 = tf.layers.flatten(pool1)
             dense2 = tf.layers.dense(out1, self.dim_x)
             dense2 = tf.cast(dense2, tf.float64)
 

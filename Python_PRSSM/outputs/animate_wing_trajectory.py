@@ -156,6 +156,19 @@ def load_clean_mat(path: Path) -> Dict[str, np.ndarray]:
     return {k: v for k, v in raw.items() if not k.startswith("__")}
 
 
+def list_mat_files_long(folder: Path) -> List[Path]:
+    if not path_exists_long(folder):
+        return []
+
+    try:
+        names = os.listdir(to_windows_long_path(folder))
+    except (FileNotFoundError, OSError):
+        return []
+
+    mat_files = [folder / name for name in names if name.lower().endswith(".mat")]
+    return sorted(mat_files)
+
+
 def denormalize(arr: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     mean = np.asarray(mean, dtype=float).reshape(1, 1, -1)
     std = np.asarray(std, dtype=float).reshape(1, 1, -1)
@@ -204,15 +217,16 @@ def build_default_out_dir(out_folder_name: str) -> Path:
 
 def has_prediction_mat_file(out_dir: Path) -> bool:
     mat_dir = out_dir / "matfiles"
-    if not mat_dir.exists():
+    if not path_exists_long(mat_dir):
         return False
 
-    for path in mat_dir.glob("*.mat"):
+    mat_files = list_mat_files_long(mat_dir)
+    for path in mat_files:
         name = path.name.lower()
         if "predict" in name or ("train" in name and "test" in name):
             return True
 
-    return any(mat_dir.glob("*.mat"))
+    return bool(mat_files)
 
 
 def list_available_output_dirs() -> List[Path]:
@@ -276,16 +290,17 @@ def choose_output_dir_interactive() -> Path:
 
 def list_prediction_mat_files(out_dir: Path) -> List[Path]:
     mat_dir = out_dir / "matfiles"
-    if not mat_dir.exists():
+    if not path_exists_long(mat_dir):
         return []
 
+    mat_files = list_mat_files_long(mat_dir)
     preferred = [
-        p for p in sorted(mat_dir.glob("*.mat"))
+        p for p in mat_files
         if ("predict" in p.name.lower()) and ("train" in p.name.lower() or "test" in p.name.lower())
     ]
     if preferred:
         return preferred
-    return sorted(mat_dir.glob("*.mat"))
+    return mat_files
 
 
 def choose_prediction_file_interactive(out_dir: Path) -> Path:
@@ -506,6 +521,8 @@ class WingTrajectoryAnimator:
         self.output_selector_popup_fig = None
         self.input_selector_checks = None
         self.output_selector_checks = None
+        self.input_selector_check_texts = []
+        self.output_selector_check_texts = []
         self.selected_input_arrow_vars = set(INPUT_VARIABLE_NAMES)
         self.selected_output_arrow_vars = set(OUTPUT_VARIABLE_NAMES)
         self.paused = True
@@ -1006,22 +1023,27 @@ class WingTrajectoryAnimator:
         if kind == "input":
             fig_attr = "input_selector_popup_fig"
             checks_attr = "input_selector_checks"
+            check_texts_attr = "input_selector_check_texts"
             title = "Input Arrow Selection"
             names = INPUT_VARIABLE_NAMES
             descriptions = INPUT_VARIABLE_DESCRIPTIONS
             selected = self.selected_input_arrow_vars
             on_toggle = self._on_input_arrow_selector_toggle
+            color_map = INPUT_ARROW_COLORS
         else:
             fig_attr = "output_selector_popup_fig"
             checks_attr = "output_selector_checks"
+            check_texts_attr = "output_selector_check_texts"
             title = "Output Arrow Selection"
             names = OUTPUT_VARIABLE_NAMES
             descriptions = OUTPUT_VARIABLE_DESCRIPTIONS
             selected = self.selected_output_arrow_vars
             on_toggle = self._on_output_arrow_selector_toggle
+            color_map = OUTPUT_ARROW_COLORS
 
         popup = getattr(self, fig_attr)
         if popup is not None and plt.fignum_exists(popup.number):
+            self._refresh_arrow_selector_checkmarks(kind)
             popup.canvas.draw_idle()
             return
 
@@ -1036,13 +1058,12 @@ class WingTrajectoryAnimator:
         labels = [f"{name} ({descriptions[name]})" for name in names]
         checks = CheckButtons(ax, labels, [name in selected for name in names])
 
-        for label in checks.labels:
+        for name, label in zip(names, checks.labels):
             label.set_fontsize(8.2)
-            label.set_color("#332f26")
+            label.set_color(color_map[name])
         for line_group in checks.lines:
             for line in line_group:
-                line.set_color("#1a1aff")
-                line.set_linewidth(1.2)
+                line.set_visible(False)
         for spine in ax.spines.values():
             spine.set_edgecolor("#d8d2c2")
         ax.set_title(title, fontsize=10.0, fontweight="bold", pad=6)
@@ -1057,9 +1078,30 @@ class WingTrajectoryAnimator:
             color="#5b5345",
         )
 
+        check_texts = []
+        for name, line_group in zip(names, checks.lines):
+            x_data = line_group[0].get_xdata()
+            y_data = line_group[0].get_ydata()
+            x_center = float(np.mean(x_data))
+            y_center = float(np.mean(y_data))
+            check_text = ax.text(
+                x_center,
+                y_center,
+                "✓",
+                ha="center",
+                va="center",
+                fontsize=12.5,
+                fontweight="bold",
+                color=color_map[name],
+                transform=ax.transAxes,
+                visible=(name in selected),
+            )
+            check_texts.append(check_text)
+
         checks.on_clicked(on_toggle)
         setattr(self, fig_attr, popup)
         setattr(self, checks_attr, checks)
+        setattr(self, check_texts_attr, check_texts)
         popup.show()
 
     def _on_input_arrow_selector_toggle(self, label: str) -> None:
@@ -1068,6 +1110,7 @@ class WingTrajectoryAnimator:
             self.selected_input_arrow_vars.remove(name)
         else:
             self.selected_input_arrow_vars.add(name)
+        self._refresh_arrow_selector_checkmarks("input")
         self._update_frame(self.frame_idx)
 
     def _on_output_arrow_selector_toggle(self, label: str) -> None:
@@ -1076,7 +1119,28 @@ class WingTrajectoryAnimator:
             self.selected_output_arrow_vars.remove(name)
         else:
             self.selected_output_arrow_vars.add(name)
+        self._refresh_arrow_selector_checkmarks("output")
         self._update_frame(self.frame_idx)
+
+    def _refresh_arrow_selector_checkmarks(self, kind: str) -> None:
+        if kind == "input":
+            names = INPUT_VARIABLE_NAMES
+            selected = self.selected_input_arrow_vars
+            popup = self.input_selector_popup_fig
+            check_texts = self.input_selector_check_texts
+        else:
+            names = OUTPUT_VARIABLE_NAMES
+            selected = self.selected_output_arrow_vars
+            popup = self.output_selector_popup_fig
+            check_texts = self.output_selector_check_texts
+
+        if popup is None or not plt.fignum_exists(popup.number):
+            return
+
+        for name, check_text in zip(names, check_texts):
+            check_text.set_visible(name in selected)
+
+        popup.canvas.draw_idle()
 
     def _on_split_change(self, label: str) -> None:
         self.split = label

@@ -1,9 +1,11 @@
 import os
 import json
 import time
+from pathlib import Path
 from database.data_manager import FlappingWingAerodynamics
 from training.trainer import Trainer
 from outputs.outputs import Outputs
+from outputs.postprocess_model_outputs import run_for_output_dir
 from model.prssm import PRSSM
 
 # model
@@ -20,7 +22,7 @@ seq_stride = seq_len    # distance between two sub-trajectories, in this applica
 # directories
 parent_dir = os.path.dirname(os.getcwd())
 in_dir = parent_dir + '/Data/Input/'
-out_dir = parent_dir + '/Data/Output/' + 'Output_folder_earlystop5/'  # Replace the folder name with the desired one
+out_dir = parent_dir + '/Data/Output/' + 'Output_folder_earlystopX/'  # Replace the folder name with the desired one
 model_dir = out_dir[:]
 
 if not os.path.exists(out_dir):
@@ -40,7 +42,7 @@ if answer.upper() in ["Y", "YES"]:
     retrain = False
     model_config = {
         # dataset
-        'batch_size': 8,  # batch size
+        'batch_size': 20,  # batch size
         'shuffle': 10000,  # shuffle buffer size
         'lik_seq_length_factor': lik_seq_length_factor,
         # method
@@ -48,6 +50,9 @@ if answer.upper() in ["Y", "YES"]:
         'ind_pnt_num': 100,  # number of inducing points
         'samples': 30,  # number of particles
         'learning_rate': 0.03,
+        'learning_rate_decay_steps': 1000,
+        'learning_rate_decay_rate': 0.96,
+        'learning_rate_decay_staircase': True,
         'recog_len': 60,  # 2*t' in paper, number of steps for recognition model
         'recog_model': 'zeros',
         'zeta_pos': 2.,
@@ -124,3 +129,4 @@ if train:
 
 # evaluate
 outputs.create_all()
+run_for_output_dir(Path(out_dir), show_plots=False)

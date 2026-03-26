@@ -18,7 +18,7 @@ from scipy.io import loadmat
 # ============================================================
 
 OUT_DIR = Path(
-    r"C:\Files from USB\Carleton Year 5\MAAE 4907-N (Capstone Project - Micro Flapping-Wing Flyer (MFWF))\Neural Network (Fall 2025 - Winter 2026)\Data\Output\Output_folder_earlystop3 (patience 25, min_delta1e-3, epoch 312, batch 16)"
+    r"C:\Files from USB\Carleton Year 5\MAAE 4907-N (Capstone Project - Micro Flapping-Wing Flyer (MFWF))\Neural Network (Fall 2025 - Winter 2026)\Data\Output\Output_folder_earlystopX"
 )
 
 TRAINING_LOG_FILE = OUT_DIR / "training_log.txt"
@@ -339,10 +339,25 @@ def plot_loss_vs_epoch_zoomed(history_df: pd.DataFrame, save_path: Path) -> None
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
 
-    ymin = min(history_df["train_loss"].min(), history_df["test_loss"].min())
-    ymax = max(history_df["train_loss"].max(), history_df["test_loss"].max())
-    pad = 0.05 * (ymax - ymin) if ymax > ymin else 1.0
-    ax.set_ylim(ymin - pad, ymax + pad)
+    # Plot the full training history on the x-axis, but ignore the first few
+    # epochs when setting the y-axis so the initial drop does not dominate.
+    zoom_history_df = history_df.loc[history_df["epoch"] >= 5]
+    if zoom_history_df.empty:
+        zoom_history_df = history_df
+
+    zoom_losses = np.concatenate([
+        zoom_history_df["train_loss"].to_numpy(dtype=float),
+        zoom_history_df["test_loss"].to_numpy(dtype=float),
+    ])
+
+    ymin = float(np.min(zoom_losses))
+    ymax = float(np.max(zoom_losses))
+    span = ymax - ymin
+    scale = max(abs(ymin), abs(ymax), 1.0)
+    lower_pad = 0.05 * span if span > 0 else 0.03 * scale
+    upper_pad = 0.20 * span if span > 0 else 0.10 * scale
+    ax.set_xlim(float(history_df["epoch"].min()), float(history_df["epoch"].max()))
+    ax.set_ylim(ymin - lower_pad, ymax + upper_pad)
 
     ax.grid(True, alpha=0.3)
     ax.legend()
@@ -517,6 +532,19 @@ def plot_training_time_vs_accuracy(
 def show_all_figures() -> None:
     if SHOW_PLOTS and GENERATED_FIGURES:
         plt.show(block=True)
+
+
+def run_for_output_dir(out_dir: Path, show_plots: bool = False) -> None:
+    global OUT_DIR, TRAINING_LOG_FILE, MAT_DIR, FIG_DIR, METRICS_FILE, SHOW_PLOTS, GENERATED_FIGURES
+
+    OUT_DIR = Path(out_dir)
+    TRAINING_LOG_FILE = OUT_DIR / "training_log.txt"
+    MAT_DIR = OUT_DIR / "matfiles"
+    FIG_DIR = OUT_DIR / "figures"
+    METRICS_FILE = OUT_DIR / "metrics_summary.csv"
+    SHOW_PLOTS = show_plots
+    GENERATED_FIGURES = []
+    main()
 
 
 # ============================================================
