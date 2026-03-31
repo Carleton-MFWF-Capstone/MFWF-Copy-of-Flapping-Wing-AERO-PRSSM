@@ -104,12 +104,21 @@ class PRSSM(BaseModel):
             elbo = log_lik - kl_reg
             self.loss = tf.negative(elbo)
 
-            # Fixed learning rate. Exponential decay is intentionally disabled.
-            # decay_steps = self.config.get('learning_rate_decay_steps', 1000)
-            # decay_rate = self.config.get('learning_rate_decay_rate', 0.96)
-            # staircase = self.config.get('learning_rate_decay_staircase', True)
             self.global_step = tf.Variable(0, trainable=False, name='global_step')
-            self.learning_rate = tf.constant(self.config['learning_rate'], dtype=tf.float64)
+            if self.config.get('use_learning_rate_decay', False):
+                decay_steps = self.config.get('learning_rate_decay_steps', 1000)
+                decay_rate = self.config.get('learning_rate_decay_rate', 0.96)
+                staircase = self.config.get('learning_rate_decay_staircase', True)
+                self.learning_rate = tf.train.exponential_decay(
+                    learning_rate=self.config['learning_rate'],
+                    global_step=self.global_step,
+                    decay_steps=decay_steps,
+                    decay_rate=decay_rate,
+                    staircase=staircase
+                )
+            else:
+                self.learning_rate = tf.constant(self.config['learning_rate'], dtype=tf.float64)
+            self.learning_rate = tf.cast(self.learning_rate, tf.float64)
             optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
             self.train = optimizer.minimize(
                 self.loss,
@@ -167,13 +176,43 @@ class PRSSM(BaseModel):
             sample_uy = sample_uy[:, :recog_len, :]
             sample_uy = tf.cast(sample_uy, tf.float32)
 
-            layer1 = tf.layers.conv1d(sample_uy, 5, 3, activation=tf.nn.tanh)  # 5 filters, kernel size 3
-            pool1 = tf.layers.max_pooling1d(layer1, 5, 3)  # pool size 2, stride 2
-            out1 = tf.layers.flatten(pool1)
-            dense2 = tf.layers.dense(out1, self.dim_x)
-            dense2 = tf.cast(dense2, tf.float64)
+            # Controls how many convolution blocks are used in the recognition model.
+            # Use 1 to run only the first conv/pooling block.
+            # Use 2 (or any value > 1) to also run the second conv/pooling block below.
+            number_of_layers = int(self.config.get('number_of_layers', 1))
 
-            x_0 = tf.expand_dims(dense2, axis=1) + tf.zeros((self.batch_tf, self.samples, self.dim_x), dtype=tf.float64)
+            # First convolution block:
+            # - 7 is the number of learned filters/features produced by this layer.
+            # - 2 is the kernel size, so each filter looks at 2 time steps at once.
+            # - tf.nn.tanh is the activation function applied after the convolution.
+            layer1 = tf.layers.conv1d(sample_uy, 6, 3, activation=tf.nn.sigmoid)
+            # First pooling block:
+            # - 1 is the pool size.
+            # - 2 is the pooling stride, which downsamples along the time axis.
+            pool1 = tf.layers.max_pooling1d(layer1, 2, 4)
+
+            # If number_of_layers <= 1, the model stops here and uses only the first
+            # conv/pooling block for the recognition features.
+            if number_of_layers <= 1:
+                recog_features = pool1
+            else:
+                # Second convolution block:
+                # - 15 is the number of learned filters/features in the second layer.
+                # - 6 is the kernel size for the second temporal convolution.
+                layer2 = tf.layers.conv1d(pool1, 15, 6, activation=tf.nn.tanh)
+                # Second pooling block:
+                # - 5 is the pool size.
+                # - 2 is the pooling stride.
+                recog_features = tf.layers.max_pooling1d(layer2, 5, 2)
+
+            # Flatten collapses the conv feature map into a single vector per sample.
+            recog_flat = tf.layers.flatten(recog_features)
+            # Dense projects the flattened recognition features into the latent-state
+            # dimension dim_x, which is used to initialize x_0.
+            recog_dense = tf.layers.dense(recog_flat, self.dim_x)
+            recog_dense = tf.cast(recog_dense, tf.float64)
+
+            x_0 = tf.expand_dims(recog_dense, axis=1) + tf.zeros((self.batch_tf, self.samples, self.dim_x), dtype=tf.float64)
 
         if recog == 'rnn':
             sample_uy = sample_in

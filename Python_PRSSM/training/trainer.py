@@ -40,86 +40,8 @@ class Trainer:
                 write_meta_graph = False
                 time.sleep(1.0)
 
-    def _summarize_training_diagnosis(self, patience, stopped_early):
-        if not self.train_all or not self.test_all:
-            return {
-                'status': 'unavailable',
-                'reason': 'Test-loss history is not available, so overtraining cannot be evaluated.',
-            }
-
-        train_hist = np.asarray(self.train_all, dtype=float)
-        test_hist = np.asarray(self.test_all, dtype=float)
-
-        best_epoch = int(np.argmin(test_hist))
-        best_test = float(test_hist[best_epoch])
-        final_test = float(test_hist[-1])
-        initial_test = float(test_hist[0])
-        train_at_best = float(train_hist[best_epoch])
-        final_train = float(train_hist[-1])
-        epochs_after_best = int(len(test_hist) - 1 - best_epoch)
-
-        denom_best = max(abs(best_test), 1e-12)
-        denom_initial = max(abs(initial_test), 1e-12)
-        denom_train_best = max(abs(train_at_best), 1e-12)
-
-        test_degradation_from_best = (final_test - best_test) / denom_best
-        best_test_improvement = (initial_test - best_test) / denom_initial
-        train_improvement_after_best = (train_at_best - final_train) / denom_train_best
-
-        recent_window = min(5, len(test_hist))
-        recent_test_change = 0.0
-        recent_train_change = 0.0
-        if recent_window >= 2:
-            recent_test_change = float(test_hist[-recent_window] - test_hist[-1])
-            recent_train_change = float(train_hist[-recent_window] - train_hist[-1])
-
-        if (
-            epochs_after_best >= max(3, patience)
-            and test_degradation_from_best >= 0.02
-            and train_improvement_after_best >= 0.01
-        ):
-            return {
-                'status': 'overtraining',
-                'reason': (
-                    'Test loss reached its minimum at epoch {} and then rose by {:.2%}, '
-                    'while training loss still improved by {:.2%}.'
-                ).format(best_epoch, test_degradation_from_best, train_improvement_after_best),
-            }
-
-        if (
-            not stopped_early
-            and best_epoch >= len(test_hist) - recent_window
-            and recent_test_change > 0.0
-            and recent_train_change > 0.0
-            and best_test_improvement >= 0.01
-        ):
-            return {
-                'status': 'undertraining',
-                'reason': (
-                    'Training ended while both train and test loss were still improving; '
-                    'the best test loss occurred near the final epoch (epoch {}).'
-                ).format(best_epoch),
-            }
-
-        if stopped_early and epochs_after_best <= max(1, patience):
-            return {
-                'status': 'well-balanced',
-                'reason': (
-                    'Early stopping triggered close to the best test epoch, '
-                    'which suggests the stopping point was reasonably timed.'
-                ),
-            }
-
-        return {
-            'status': 'inconclusive',
-            'reason': (
-                'Train/test loss trends do not strongly indicate overtraining or undertraining '
-                'based on the current heuristic.'
-            ),
-        }
-
     def train(self, ds, epochs, retrain=False, test_data=False,
-              early_stopping=True, patience=3, min_delta=100000):
+              early_stopping=True, patience=2, min_delta=3.162278):
         print('\nTraining...\n')
 
         training_start_time = time.time()
@@ -258,12 +180,5 @@ class Trainer:
                     total_training_time / 60.0,
                     total_training_time / 3600.0
                 ))
-
-                diagnosis = self._summarize_training_diagnosis(
-                    patience=patience,
-                    stopped_early=stopped_early,
-                )
-                log('Training diagnosis: {}'.format(diagnosis['status']))
-                log('  -> {}'.format(diagnosis['reason']))
 
         log_file.close()

@@ -38,6 +38,9 @@ FEATURE_COLUMNS = [
     "min_delta",
 ]
 
+DEFAULT_PATIENCE = 3
+DEFAULT_MIN_DELTA = 100000.0
+
 
 def clean_label(value: object) -> str:
     if pd.isna(value):
@@ -149,6 +152,9 @@ def load_experiment_table(excel_path: Path, sheet_name: str | None = None) -> pd
         "average_test_overtrained": "overtraining_label",
         "average_test_training_classification": "training_classification",
         "training_classification": "training_classification",
+        "epoch": "epoch",
+        "total_training_time_seconds": "training_time_seconds",
+        "total_training_time_hours": "training_time_hours",
         "notes": "notes",
     }
     df = df.rename(columns=rename_map)
@@ -169,6 +175,9 @@ def load_experiment_table(excel_path: Path, sheet_name: str | None = None) -> pd
         "batch_size",
         "patience",
         "min_delta",
+        "epoch",
+        "training_time_seconds",
+        "training_time_hours",
         "CF_X_RMSE",
         "CF_X_R2",
         "CF_Y_RMSE",
@@ -221,6 +230,16 @@ def compute_average_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df["average_rmse_recomputed"] = computed_average_rmse
     df["average_r2_recomputed"] = computed_average_r2
     df["optimization_score"] = df["average_rmse"] + (1.0 - df["average_r2"])
+
+    for column in ["epoch", "training_time_seconds", "training_time_hours"]:
+        if column not in df.columns:
+            df[column] = np.nan
+
+    if "training_time_seconds" not in df.columns and "training_time_hours" in df.columns:
+        df["training_time_seconds"] = pd.to_numeric(df["training_time_hours"], errors="coerce") * 3600.0
+    if "training_time_hours" not in df.columns and "training_time_seconds" in df.columns:
+        df["training_time_hours"] = pd.to_numeric(df["training_time_seconds"], errors="coerce") / 3600.0
+
     return df
 
 
@@ -349,6 +368,27 @@ def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     return features
 
 
+def normalize_layer_counts(df_features: pd.DataFrame) -> pd.DataFrame:
+    normalized = df_features.copy()
+    layer2_columns = [
+        "layer2_activation_function",
+        "layer2_filters",
+        "layer2_kernel_size",
+        "layer2_pool_size",
+        "layer2_stride",
+    ]
+    single_layer_mask = pd.to_numeric(
+        normalized["number_of_layers"],
+        errors="coerce",
+    ).fillna(1).astype(int).eq(1)
+
+    normalized.loc[single_layer_mask, "layer2_activation_function"] = "N/A"
+    for column in layer2_columns[1:]:
+        normalized.loc[single_layer_mask, column] = np.nan
+
+    return normalized
+
+
 def unique_sorted(values: Iterable[object]) -> List[object]:
     clean_values = [value for value in values if not pd.isna(value)]
     try:
@@ -360,6 +400,41 @@ def unique_sorted(values: Iterable[object]) -> List[object]:
 def unique_numeric(values: Iterable[object]) -> List[float]:
     clean = pd.to_numeric(pd.Series(list(values)), errors="coerce").dropna().tolist()
     return sorted(set(float(value) for value in clean))
+
+
+def compute_numeric_default(
+    values: Iterable[object],
+    fallback: float,
+    integer: bool = False,
+) -> float | int:
+    observed = unique_numeric(values)
+    if not observed:
+        return int(fallback) if integer else float(fallback)
+
+    counts = pd.Series(observed).value_counts()
+    if not counts.empty:
+        default = float(counts.index[0])
+    else:
+        default = float(np.median(observed))
+
+    if integer:
+        return int(round(default))
+    return default
+
+
+def get_early_stopping_defaults(df_features: pd.DataFrame) -> Dict[str, float | int]:
+    return {
+        "patience": compute_numeric_default(
+            df_features["patience"],
+            fallback=DEFAULT_PATIENCE,
+            integer=True,
+        ),
+        "min_delta": compute_numeric_default(
+            df_features["min_delta"],
+            fallback=DEFAULT_MIN_DELTA,
+            integer=False,
+        ),
+    }
 
 
 def generate_integer_candidates(
@@ -489,7 +564,12 @@ def build_candidate_grid(
     df_features: pd.DataFrame,
     random_state: int = 42,
     max_candidates: int = 30000,
+    early_stopping_defaults: Dict[str, float | int] | None = None,
 ) -> pd.DataFrame:
+    early_stopping_defaults = early_stopping_defaults or {
+        "patience": DEFAULT_PATIENCE,
+        "min_delta": DEFAULT_MIN_DELTA,
+    }
     search_space = {
         "number_of_layers": generate_integer_candidates(df_features["number_of_layers"], minimum=1, maximum=3),
         "layer1_activation_function": unique_sorted(df_features["layer1_activation_function"]),
@@ -499,8 +579,10 @@ def build_candidate_grid(
         "layer1_stride": generate_integer_candidates(df_features["layer1_stride"], minimum=1, maximum=6),
         "learning_rate": generate_learning_rate_candidates(df_features["learning_rate"]),
         "batch_size": generate_integer_candidates(df_features["batch_size"], minimum=4, maximum=64),
-        "patience": generate_integer_candidates(df_features["patience"], minimum=1, maximum=30),
-        "min_delta": generate_log_candidates(df_features["min_delta"]),
+        "patience": generate_integer_candidates(df_features["patience"], minimum=1, maximum=30)
+        or [int(early_stopping_defaults["patience"])],
+        "min_delta": generate_log_candidates(df_features["min_delta"])
+        or [float(early_stopping_defaults["min_delta"])],
     }
 
     layer2_space = {
@@ -550,17 +632,176 @@ def build_candidate_grid(
     return pd.DataFrame(candidates, columns=FEATURE_COLUMNS).reset_index(drop=True)
 
 
-def summarize_configuration(row: pd.Series) -> Dict[str, object]:
+def summarize_configuration(
+    row: pd.Series,
+    early_stopping_defaults: Dict[str, float | int] | None = None,
+) -> Dict[str, object]:
     summary: Dict[str, object] = {}
+    early_stopping_defaults = early_stopping_defaults or {
+        "patience": DEFAULT_PATIENCE,
+        "min_delta": DEFAULT_MIN_DELTA,
+    }
     for column in FEATURE_COLUMNS:
         value = row[column]
         if pd.isna(value):
-            summary[column] = "N/A"
+            summary[column] = early_stopping_defaults.get(column, "N/A")
         elif isinstance(value, np.generic):
             summary[column] = value.item()
         else:
             summary[column] = value
     return summary
+
+
+def summarize_prediction(row: pd.Series) -> Dict[str, object]:
+    summary = {
+        "configuration": summarize_configuration(row),
+        "is_novel_configuration": bool(row["is_novel_configuration"]),
+        "predicted_average_rmse": float(row["predicted_average_rmse"]),
+        "predicted_average_r2": float(row["predicted_average_r2"]),
+        "predicted_score_raw": float(row["predicted_score_raw"]),
+        "predicted_score": float(row["predicted_score"]),
+        "overtraining_risk": str(row["overtraining_risk"]),
+        "overtraining_reason": str(row["overtraining_reason"]),
+        "classification_preference": str(row.get("classification_preference", "")),
+    }
+    for column in ["predicted_epoch", "predicted_training_time_seconds", "predicted_training_time_hours"]:
+        value = row.get(column)
+        if value is not None and not pd.isna(value):
+            summary[column] = float(value)
+    return summary
+
+
+def summarize_recommendation(
+    row: pd.Series,
+    early_stopping_defaults: Dict[str, float | int] | None = None,
+) -> Dict[str, object]:
+    summary = summarize_prediction(row)
+    summary["configuration"] = summarize_configuration(row, early_stopping_defaults)
+    return summary
+
+
+def _format_scalar(value: object, decimals: int = 4) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "-"
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):.{decimals}f}"
+    return str(value)
+
+
+def build_recommendation_comparison_table(results: Dict[str, object]) -> str:
+    observed = results["best_observed"]
+    predicted = results["best_accuracy_recommendation"]
+    conservative = results["best_conservative_recommendation"]
+    balanced = results["best_balanced_accuracy_recommendation"]
+
+    rows = [
+        {
+            "Option": "Current Best",
+            "Source": "Observed",
+            "Avg RMSE": _format_scalar(observed.get("average_rmse")),
+            "Avg R2": _format_scalar(observed.get("average_r2")),
+            "Score": _format_scalar(observed.get("score")),
+            "Risk": "high" if observed.get("is_overtraining_flagged") else observed.get("training_classification", "-"),
+            "Novel": "No",
+            "Layers": _format_scalar(observed["configuration"].get("number_of_layers"), decimals=0),
+            "LR": _format_scalar(observed["configuration"].get("learning_rate"), decimals=6),
+            "Batch": _format_scalar(observed["configuration"].get("batch_size"), decimals=0),
+            "Patience": _format_scalar(observed["configuration"].get("patience"), decimals=0),
+            "Min Delta": _format_scalar(observed["configuration"].get("min_delta"), decimals=6),
+            "Epoch": _format_scalar(observed.get("epoch"), decimals=0),
+            "Hours": _format_scalar(observed.get("training_time_hours"), decimals=2),
+        },
+        {
+            "Option": "Accuracy Rec.",
+            "Source": "Predicted",
+            "Avg RMSE": _format_scalar(predicted.get("predicted_average_rmse")),
+            "Avg R2": _format_scalar(predicted.get("predicted_average_r2")),
+            "Score": _format_scalar(predicted.get("predicted_score")),
+            "Risk": _format_scalar(predicted.get("overtraining_risk")),
+            "Novel": "Yes" if predicted.get("is_novel_configuration") else "No",
+            "Layers": _format_scalar(predicted["configuration"].get("number_of_layers"), decimals=0),
+            "LR": _format_scalar(predicted["configuration"].get("learning_rate"), decimals=6),
+            "Batch": _format_scalar(predicted["configuration"].get("batch_size"), decimals=0),
+            "Patience": _format_scalar(predicted["configuration"].get("patience"), decimals=0),
+            "Min Delta": _format_scalar(predicted["configuration"].get("min_delta"), decimals=6),
+            "Epoch": _format_scalar(predicted.get("predicted_epoch"), decimals=0),
+            "Hours": _format_scalar(predicted.get("predicted_training_time_hours"), decimals=2),
+        },
+        {
+            "Option": "Conservative",
+            "Source": "Predicted",
+            "Avg RMSE": _format_scalar(conservative.get("predicted_average_rmse")),
+            "Avg R2": _format_scalar(conservative.get("predicted_average_r2")),
+            "Score": _format_scalar(conservative.get("predicted_score")),
+            "Risk": _format_scalar(conservative.get("overtraining_risk")),
+            "Novel": "Yes" if conservative.get("is_novel_configuration") else "No",
+            "Layers": _format_scalar(conservative["configuration"].get("number_of_layers"), decimals=0),
+            "LR": _format_scalar(conservative["configuration"].get("learning_rate"), decimals=6),
+            "Batch": _format_scalar(conservative["configuration"].get("batch_size"), decimals=0),
+            "Patience": _format_scalar(conservative["configuration"].get("patience"), decimals=0),
+            "Min Delta": _format_scalar(conservative["configuration"].get("min_delta"), decimals=6),
+            "Epoch": _format_scalar(conservative.get("predicted_epoch"), decimals=0),
+            "Hours": _format_scalar(conservative.get("predicted_training_time_hours"), decimals=2),
+        },
+        {
+            "Option": "Balanced Acc.",
+            "Source": "Predicted",
+            "Avg RMSE": _format_scalar(balanced.get("predicted_average_rmse")),
+            "Avg R2": _format_scalar(balanced.get("predicted_average_r2")),
+            "Score": _format_scalar(balanced.get("predicted_score")),
+            "Risk": _format_scalar(balanced.get("overtraining_risk")),
+            "Novel": "Yes" if balanced.get("is_novel_configuration") else "No",
+            "Layers": _format_scalar(balanced["configuration"].get("number_of_layers"), decimals=0),
+            "LR": _format_scalar(balanced["configuration"].get("learning_rate"), decimals=6),
+            "Batch": _format_scalar(balanced["configuration"].get("batch_size"), decimals=0),
+            "Patience": _format_scalar(balanced["configuration"].get("patience"), decimals=0),
+            "Min Delta": _format_scalar(balanced["configuration"].get("min_delta"), decimals=6),
+            "Epoch": _format_scalar(balanced.get("predicted_epoch"), decimals=0),
+            "Hours": _format_scalar(balanced.get("predicted_training_time_hours"), decimals=2),
+        },
+    ]
+
+    columns = list(rows[0].keys())
+    widths = {
+        column: max(len(column), max(len(str(row[column])) for row in rows))
+        for column in columns
+    }
+
+    def render_row(row: Dict[str, object]) -> str:
+        return " | ".join(str(row[column]).ljust(widths[column]) for column in columns)
+
+    header = render_row({column: column for column in columns})
+    separator = "-+-".join("-" * widths[column] for column in columns)
+    body = [render_row(row) for row in rows]
+    return "\n".join([header, separator, *body])
+
+
+def fit_auxiliary_surrogates(
+    features: pd.DataFrame,
+    experiments: pd.DataFrame,
+    random_state: int,
+) -> Dict[str, Pipeline]:
+    targets = {
+        "predicted_epoch": "epoch",
+        "predicted_training_time_seconds": "training_time_seconds",
+        "predicted_training_time_hours": "training_time_hours",
+    }
+    models: Dict[str, Pipeline] = {}
+
+    for prediction_name, experiment_column in targets.items():
+        if experiment_column not in experiments.columns:
+            continue
+        target = pd.to_numeric(experiments[experiment_column], errors="coerce")
+        mask = target.notna()
+        if mask.sum() < 3:
+            continue
+        models[prediction_name] = build_surrogate_model(
+            features.loc[mask],
+            target.loc[mask],
+            random_state=random_state,
+        )
+
+    return models
 
 
 def estimate_overtraining_risk(
@@ -573,22 +814,21 @@ def estimate_overtraining_risk(
     undertrained = experiments[experiments.get("is_undertraining_flagged", False)].copy()
     inconclusive = experiments[experiments.get("is_inconclusive_flagged", False)].copy()
     unavailable = experiments[experiments.get("is_unavailable_flagged", False)].copy()
-    safe = experiments[
-        ~experiments["is_overtraining_flagged"]
-        & ~experiments.get("is_undertraining_flagged", False)
-        & ~experiments.get("is_inconclusive_flagged", False)
-        & ~experiments.get("is_unavailable_flagged", False)
+    well_balanced = experiments[
+        experiments["training_classification_normalized"].eq("well-balanced")
     ].copy()
+    non_overtrained = experiments[~experiments["is_overtraining_flagged"]].copy()
 
     candidates["overtraining_risk"] = "low"
     candidates["overtraining_penalty"] = 0.0
     candidates["overtraining_reason"] = ""
+    candidates["classification_preference"] = ""
 
-    if flagged.empty or safe.empty:
+    if flagged.empty or non_overtrained.empty:
         return candidates
 
-    max_safe_patience = pd.to_numeric(safe["patience"], errors="coerce").max()
-    min_safe_min_delta = pd.to_numeric(safe["min_delta"], errors="coerce").min()
+    max_non_overtrained_patience = pd.to_numeric(non_overtrained["patience"], errors="coerce").max()
+    min_non_overtrained_min_delta = pd.to_numeric(non_overtrained["min_delta"], errors="coerce").min()
 
     patience_values_flagged = set(pd.to_numeric(flagged["patience"], errors="coerce").dropna().tolist())
     min_delta_values_flagged = set(pd.to_numeric(flagged["min_delta"], errors="coerce").dropna().tolist())
@@ -598,12 +838,12 @@ def estimate_overtraining_risk(
         & candidates["min_delta"].isin(min_delta_values_flagged)
     )
     extrapolated_mask = (
-        (pd.to_numeric(candidates["patience"], errors="coerce") > max_safe_patience)
-        | (pd.to_numeric(candidates["min_delta"], errors="coerce") < min_safe_min_delta)
+        (pd.to_numeric(candidates["patience"], errors="coerce") > max_non_overtrained_patience)
+        | (pd.to_numeric(candidates["min_delta"], errors="coerce") < min_non_overtrained_min_delta)
     )
 
     candidates.loc[exact_flagged_mask, "overtraining_risk"] = "high"
-    candidates.loc[exact_flagged_mask, "overtraining_penalty"] = 0.10
+    candidates.loc[exact_flagged_mask, "overtraining_penalty"] = 0.12
     candidates.loc[
         exact_flagged_mask,
         "overtraining_reason",
@@ -611,11 +851,11 @@ def estimate_overtraining_risk(
 
     medium_mask = extrapolated_mask & ~exact_flagged_mask
     candidates.loc[medium_mask, "overtraining_risk"] = "medium"
-    candidates.loc[medium_mask, "overtraining_penalty"] = 0.04
+    candidates.loc[medium_mask, "overtraining_penalty"] = 0.03
     candidates.loc[
         medium_mask,
         "overtraining_reason",
-    ] = "Moves beyond the well-balanced early-stopping settings seen in the workbook."
+    ] = "Moves beyond the non-overtrained early-stopping settings seen in the workbook."
 
     near_undertrained_mask = pd.Series(False, index=candidates.index)
     if not undertrained.empty:
@@ -628,13 +868,12 @@ def estimate_overtraining_risk(
             & ~medium_mask
         )
         candidates.loc[near_undertrained_mask, "overtraining_risk"] = "medium"
-        candidates.loc[near_undertrained_mask, "overtraining_penalty"] = 0.03
+        candidates.loc[near_undertrained_mask, "overtraining_penalty"] = 0.01
         candidates.loc[
             near_undertrained_mask,
             "overtraining_reason",
-        ] = "Matches an early-stopping region previously labeled as undertraining."
+        ] = "Matches an early-stopping region previously labeled as undertraining, which may still allow higher accuracy."
 
-    caution_mask = pd.Series(False, index=candidates.index)
     for subset, reason in [
         (inconclusive, "Matches a region previously labeled inconclusive."),
         (unavailable, "Matches a region previously labeled unavailable."),
@@ -654,7 +893,80 @@ def estimate_overtraining_risk(
         candidates.loc[subset_mask, "overtraining_penalty"] = 0.02
         candidates.loc[subset_mask, "overtraining_reason"] = reason
 
+    if not well_balanced.empty:
+        balanced_patience = set(pd.to_numeric(well_balanced["patience"], errors="coerce").dropna().tolist())
+        balanced_delta = set(pd.to_numeric(well_balanced["min_delta"], errors="coerce").dropna().tolist())
+        balanced_mask = (
+            candidates["patience"].isin(balanced_patience)
+            & candidates["min_delta"].isin(balanced_delta)
+            & ~exact_flagged_mask
+        )
+        candidates.loc[balanced_mask, "overtraining_penalty"] -= 0.005
+        candidates.loc[balanced_mask, "classification_preference"] = (
+            "Small bonus for matching a previously well-balanced stopping region."
+        )
+
     return candidates
+
+
+def select_recommendations(candidate_predictions: pd.DataFrame) -> Dict[str, pd.Series]:
+    aggressive_pool = candidate_predictions[
+        candidate_predictions["overtraining_risk"] != "high"
+    ].copy()
+    if aggressive_pool.empty:
+        aggressive_pool = candidate_predictions.copy()
+    aggressive_pool = aggressive_pool.sort_values(
+        by=[
+            "predicted_average_r2",
+            "predicted_average_rmse",
+            "predicted_score",
+        ],
+        ascending=[False, True, True],
+    ).reset_index(drop=True)
+
+    conservative_pool = candidate_predictions[
+        candidate_predictions["overtraining_risk"] == "low"
+    ].copy()
+    if conservative_pool.empty:
+        conservative_pool = aggressive_pool.copy()
+
+    conservative_pool["conservative_score"] = (
+        conservative_pool["predicted_score"]
+        + np.where(conservative_pool["is_novel_configuration"], 0.01, 0.0)
+        - np.where(conservative_pool["classification_preference"] != "", 0.005, 0.0)
+    )
+    conservative_pool = conservative_pool.sort_values(
+        by=[
+            "conservative_score",
+            "predicted_average_r2",
+            "predicted_average_rmse",
+        ],
+        ascending=[True, False, True],
+    ).reset_index(drop=True)
+
+    balanced_accuracy_pool = candidate_predictions[
+        candidate_predictions["overtraining_risk"] == "low"
+    ].copy()
+    if balanced_accuracy_pool.empty:
+        balanced_accuracy_pool = aggressive_pool.copy()
+    balanced_accuracy_pool["balanced_accuracy_score"] = (
+        balanced_accuracy_pool["predicted_score"]
+        + np.where(balanced_accuracy_pool["is_novel_configuration"], 0.005, 0.0)
+    )
+    balanced_accuracy_pool = balanced_accuracy_pool.sort_values(
+        by=[
+            "predicted_average_r2",
+            "predicted_average_rmse",
+            "balanced_accuracy_score",
+        ],
+        ascending=[False, True, True],
+    ).reset_index(drop=True)
+
+    return {
+        "aggressive": aggressive_pool.loc[0],
+        "conservative": conservative_pool.loc[0],
+        "balanced_accuracy": balanced_accuracy_pool.loc[0],
+    }
 
 
 def optimize_hyperparameters(
@@ -672,16 +984,28 @@ def optimize_hyperparameters(
         experiments = mark_overtraining_rows(experiments)
 
     features = prepare_features(experiments)
-    candidate_grid = build_candidate_grid(features)
+    features = normalize_layer_counts(features)
+    early_stopping_defaults = get_early_stopping_defaults(features)
+    for column, default in early_stopping_defaults.items():
+        features[column] = features[column].fillna(default)
+
+    candidate_grid = build_candidate_grid(
+        features,
+        early_stopping_defaults=early_stopping_defaults,
+    )
+    candidate_grid = normalize_layer_counts(candidate_grid)
     observed_signatures = observed_configuration_signatures(features)
     candidate_grid = mark_novel_configurations(candidate_grid, observed_signatures)
 
     rmse_model = build_surrogate_model(features, experiments["average_rmse"], random_state=random_state)
     r2_model = build_surrogate_model(features, experiments["average_r2"], random_state=random_state + 1)
+    auxiliary_models = fit_auxiliary_surrogates(features, experiments, random_state=random_state + 2)
 
     candidate_predictions = candidate_grid.copy()
     candidate_predictions["predicted_average_rmse"] = rmse_model.predict(candidate_grid)
     candidate_predictions["predicted_average_r2"] = r2_model.predict(candidate_grid)
+    for prediction_name, model in auxiliary_models.items():
+        candidate_predictions[prediction_name] = model.predict(candidate_grid)
     candidate_predictions = estimate_overtraining_risk(candidate_predictions, experiments)
     candidate_predictions["predicted_score_raw"] = (
         candidate_predictions["predicted_average_rmse"]
@@ -694,6 +1018,7 @@ def optimize_hyperparameters(
         by=["predicted_score", "predicted_average_rmse", "predicted_average_r2"],
         ascending=[True, True, False],
     ).reset_index(drop=True)
+    recommendations = select_recommendations(candidate_predictions)
 
     observed = pd.concat(
         [
@@ -713,7 +1038,9 @@ def optimize_hyperparameters(
     )
     best_observed_idx = observed["optimization_score"].idxmin()
     best_observed = observed.loc[best_observed_idx]
-    best_predicted = candidate_predictions.loc[0]
+    best_predicted = recommendations["aggressive"]
+    best_conservative = recommendations["conservative"]
+    best_balanced_accuracy = recommendations["balanced_accuracy"]
 
     return {
         "excel_path": str(excel_path),
@@ -721,26 +1048,30 @@ def optimize_hyperparameters(
         "rows_used": int(len(experiments)),
         "candidate_count": int(len(candidate_predictions)),
         "best_observed": {
-            "configuration": summarize_configuration(best_observed),
+            "configuration": summarize_configuration(best_observed, early_stopping_defaults),
             "average_rmse": float(best_observed["average_rmse"]),
             "average_r2": float(best_observed["average_r2"]),
             "score": float(best_observed["optimization_score"]),
+            "epoch": None if pd.isna(best_observed.get("epoch")) else float(best_observed["epoch"]),
+            "training_time_seconds": None
+            if pd.isna(best_observed.get("training_time_seconds"))
+            else float(best_observed["training_time_seconds"]),
+            "training_time_hours": None
+            if pd.isna(best_observed.get("training_time_hours"))
+            else float(best_observed["training_time_hours"]),
             "training_classification": ""
             if pd.isna(best_observed.get("training_classification_normalized"))
             else str(best_observed.get("training_classification_normalized")),
             "is_overtraining_flagged": bool(best_observed.get("is_overtraining_flagged", False)),
             "notes": "" if pd.isna(best_observed.get("notes")) else str(best_observed.get("notes")),
         },
-        "best_predicted": {
-            "configuration": summarize_configuration(best_predicted),
-            "is_novel_configuration": bool(best_predicted["is_novel_configuration"]),
-            "predicted_average_rmse": float(best_predicted["predicted_average_rmse"]),
-            "predicted_average_r2": float(best_predicted["predicted_average_r2"]),
-            "predicted_score_raw": float(best_predicted["predicted_score_raw"]),
-            "predicted_score": float(best_predicted["predicted_score"]),
-            "overtraining_risk": str(best_predicted["overtraining_risk"]),
-            "overtraining_reason": str(best_predicted["overtraining_reason"]),
-        },
+        "best_predicted": summarize_recommendation(best_predicted, early_stopping_defaults),
+        "best_accuracy_recommendation": summarize_recommendation(best_predicted, early_stopping_defaults),
+        "best_conservative_recommendation": summarize_recommendation(best_conservative, early_stopping_defaults),
+        "best_balanced_accuracy_recommendation": summarize_recommendation(
+            best_balanced_accuracy,
+            early_stopping_defaults,
+        ),
         "top_10_predicted": candidate_predictions.head(10).to_dict(orient="records"),
         "experiments_with_metrics": pd.concat(
             [
@@ -752,6 +1083,9 @@ def optimize_hyperparameters(
                         "average_rmse_recomputed",
                         "average_r2_recomputed",
                         "optimization_score",
+                        "epoch",
+                        "training_time_seconds",
+                        "training_time_hours",
                         "training_classification_normalized",
                         "is_overtraining_flagged",
                     ]
@@ -766,17 +1100,29 @@ def optimize_hyperparameters(
 
 def format_cli_report(results: Dict[str, object]) -> str:
     observed = results["best_observed"]
-    predicted = results["best_predicted"]
+    predicted = results["best_accuracy_recommendation"]
+    conservative = results["best_conservative_recommendation"]
+    balanced = results["best_balanced_accuracy_recommendation"]
+    comparison_table = build_recommendation_comparison_table(results)
 
     lines = [
         f"Rows used: {results['rows_used']}",
         f"Candidate configurations searched: {results['candidate_count']}",
         "",
+        "Recommendation comparison table:",
+        comparison_table,
+        "",
         "Best observed configuration in the workbook:",
         json.dumps(observed, indent=2),
         "",
-        "Best surrogate-model recommendation with overtraining penalty:",
+        "Best accuracy-focused recommendation (strongly avoids overtraining):",
         json.dumps(predicted, indent=2),
+        "",
+        "Best conservative recommendation (low-risk and closer to known-good regions):",
+        json.dumps(conservative, indent=2),
+        "",
+        "Best balanced high-accuracy recommendation (maximize R^2 within the low-risk subset):",
+        json.dumps(balanced, indent=2),
     ]
     return "\n".join(lines)
 
@@ -785,7 +1131,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Read the comparison workbook, compute average test RMSE/R^2 over the five output variables, "
-            "and search for the hyperparameter configuration with the best predicted overall performance."
+            "and search for the hyperparameter configuration with the best predicted overall performance while strongly avoiding overtraining."
         )
     )
     parser.add_argument(

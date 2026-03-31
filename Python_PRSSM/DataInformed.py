@@ -42,7 +42,7 @@ if answer.upper() in ["Y", "YES"]:
     retrain = False
     model_config = {
         # dataset
-        'batch_size': 20,  # batch size
+        'batch_size': 14,  # batch size
         'shuffle': 10000,  # shuffle buffer size
         'lik_seq_length_factor': lik_seq_length_factor,
         # method
@@ -50,11 +50,10 @@ if answer.upper() in ["Y", "YES"]:
         'ind_pnt_num': 100,  # number of inducing points
         'samples': 30,  # number of particles
         'learning_rate': 0.03,
-        'learning_rate_decay_steps': 1000,
-        'learning_rate_decay_rate': 0.96,
-        'learning_rate_decay_staircase': True,
+        'use_learning_rate_decay': False,
         'recog_len': 60,  # 2*t' in paper, number of steps for recognition model
         'recog_model': 'zeros',
+        'number_of_layers': 1,
         'zeta_pos': 2.,
         'zeta_mean': 0.1 ** 2,
         'zeta_var': 0.1 ** 2,
