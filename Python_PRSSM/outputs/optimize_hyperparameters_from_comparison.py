@@ -15,9 +15,28 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
 
-DEFAULT_EXCEL_PATH = Path(
-    r"C:\Files from USB\Carleton Year 5\MAAE 4907-N (Capstone Project - Micro Flapping-Wing Flyer (MFWF))\Neural Network (Fall 2025 - Winter 2026)\Data\Comparison of Model Accuracy.xlsx"
-)
+def get_repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def get_shared_data_root() -> Path:
+    return get_repo_root().parent / "Data"
+
+
+def get_candidate_data_roots() -> List[Path]:
+    return [get_shared_data_root()]
+
+
+def get_default_excel_path() -> Path:
+    workbook_name = "Comparison of Model Accuracy - Fixed Seed.xlsx"
+    for data_root in get_candidate_data_roots():
+        candidate = data_root / workbook_name
+        if candidate.exists():
+            return candidate
+    return get_candidate_data_roots()[0] / workbook_name
+
+
+DEFAULT_EXCEL_PATH = get_default_excel_path()
 
 OUTPUT_COLUMNS = ["CF_X", "CF_Y", "CM_X", "CM_Y", "CM_Z"]
 FEATURE_COLUMNS = [
@@ -32,14 +51,45 @@ FEATURE_COLUMNS = [
     "layer2_kernel_size",
     "layer2_pool_size",
     "layer2_stride",
+    "shuffle",
+    "lik_seq_length_factor",
+    "dim_x",
+    "ind_pnt_num",
+    "samples",
+    "use_learning_rate_decay",
+    "learning_rate_decay_steps",
+    "learning_rate_decay_rate",
+    "learning_rate_decay_staircase",
+    "recog_len",
+    "recog_model",
     "learning_rate",
     "batch_size",
     "patience",
     "min_delta",
+    "early_stopping_split",
+    "validation_fraction",
+    "zeta_pos",
+    "zeta_mean",
+    "zeta_var",
+    "var_x",
+    "var_y",
+    "gp_var",
+    "gp_len",
+    "epochs",
+]
+
+CATEGORICAL_FEATURE_COLUMNS = [
+    "layer1_activation_function",
+    "layer2_activation_function",
+    "use_learning_rate_decay",
+    "learning_rate_decay_staircase",
+    "recog_model",
+    "learning_rate",
+    "early_stopping_split",
 ]
 
 DEFAULT_PATIENCE = 3
-DEFAULT_MIN_DELTA = 100000.0
+DEFAULT_MIN_DELTA = 3.162278
 
 
 def clean_label(value: object) -> str:
@@ -66,17 +116,21 @@ def build_column_names(header_top: pd.Series, header_bottom: pd.Series) -> List[
             current_top = clean_label(top)
 
         bottom_label = clean_label(bottom)
+        active_top = current_top
+        if active_top == "run_tracking" and bottom_label != "training_run_number":
+            active_top = ""
+
         if bottom_label == "notes":
             columns.append("notes")
             continue
 
         if bottom_label:
-            if current_top and current_top not in {"", "nan"} and current_top != bottom_label:
-                columns.append(f"{current_top}_{bottom_label}")
+            if active_top and active_top not in {"", "nan"} and active_top != bottom_label:
+                columns.append(f"{active_top}_{bottom_label}")
             else:
                 columns.append(bottom_label)
         else:
-            columns.append(current_top or "unnamed")
+            columns.append(active_top or "unnamed")
 
     deduped: List[str] = []
     seen: Dict[str, int] = {}
@@ -109,6 +163,8 @@ def load_experiment_table(excel_path: Path, sheet_name: str | None = None) -> pd
     df.columns = columns
 
     rename_map = {
+        "training_test_number": "training_test_number",
+        "run_tracking_training_run_number": "training_run_number",
         "number_of_layers": "number_of_layers",
         "layer_1_activation_function": "layer1_activation_function",
         "layer_1_filters": "layer1_filters",
@@ -120,6 +176,32 @@ def load_experiment_table(excel_path: Path, sheet_name: str | None = None) -> pd
         "layer_2_kernel_size": "layer2_kernel_size",
         "layer_2_pool_size": "layer2_pool_size",
         "layer_2_stride": "layer2_stride",
+        "tunable_parameters_shuffle": "shuffle",
+        "tunable_parameters_lik_seq_length_factor": "lik_seq_length_factor",
+        "tunable_parameters_dim_x": "dim_x",
+        "tunable_parameters_ind_pnt_num": "ind_pnt_num",
+        "tunable_parameters_samples": "samples",
+        "tunable_parameters_use_learning_rate_decay": "use_learning_rate_decay",
+        "tunable_parameters_learning_rate_decay_steps": "learning_rate_decay_steps",
+        "tunable_parameters_learning_rate_decay_rate": "learning_rate_decay_rate",
+        "tunable_parameters_learning_rate_decay_staircase": "learning_rate_decay_staircase",
+        "tunable_parameters_recog_len": "recog_len",
+        "tunable_parameters_recog_model": "recog_model",
+        "tunable_parameters_early_stopping_split": "early_stopping_split",
+        "tunable_parameters_validation_fraction": "validation_fraction",
+        "tunable_parameters_zeta_pos": "zeta_pos",
+        "tunable_parameters_zeta_mean": "zeta_mean",
+        "tunable_parameters_zeta_var": "zeta_var",
+        "tunable_parameters_var_x": "var_x",
+        "tunable_parameters_var_y": "var_y",
+        "tunable_parameters_gp_var": "gp_var",
+        "tunable_parameters_gp_len": "gp_len",
+        "tunable_parameters_epochs": "epochs",
+        "tunable_parameters_learning_rate": "learning_rate",
+        "tunable_parameters_batch_size": "batch_size",
+        "tunable_parameters_patience": "patience",
+        "tunable_parameters_min_delta": "min_delta",
+        "tunable_parameters_epoch": "epoch",
         "layer_2_learning_rate": "learning_rate",
         "layer_2_batch_size": "batch_size",
         "layer_2_patience": "patience",
@@ -158,8 +240,25 @@ def load_experiment_table(excel_path: Path, sheet_name: str | None = None) -> pd
         "notes": "notes",
     }
     df = df.rename(columns=rename_map)
-    metric_markers = ["average_rmse_reported", "average_r2_reported"]
-    df = df[df[metric_markers].notna().all(axis=1)].copy()
+    rmse_metric_columns = [
+        "CF_X_RMSE",
+        "CF_Y_RMSE",
+        "CM_X_RMSE",
+        "CM_Y_RMSE",
+        "CM_Z_RMSE",
+    ]
+    r2_metric_columns = [
+        "CF_X_R2",
+        "CF_Y_R2",
+        "CM_X_R2",
+        "CM_Y_R2",
+        "CM_Z_R2",
+    ]
+    available_metric_columns = [
+        column for column in (rmse_metric_columns + r2_metric_columns) if column in df.columns
+    ]
+    if available_metric_columns:
+        df = df[df[available_metric_columns].notna().any(axis=1)].copy()
     df = df.reset_index(drop=True)
 
     numeric_columns = [
@@ -175,6 +274,23 @@ def load_experiment_table(excel_path: Path, sheet_name: str | None = None) -> pd
         "batch_size",
         "patience",
         "min_delta",
+        "shuffle",
+        "lik_seq_length_factor",
+        "dim_x",
+        "ind_pnt_num",
+        "samples",
+        "learning_rate_decay_steps",
+        "learning_rate_decay_rate",
+        "recog_len",
+        "validation_fraction",
+        "zeta_pos",
+        "zeta_mean",
+        "zeta_var",
+        "var_x",
+        "var_y",
+        "gp_var",
+        "gp_len",
+        "epochs",
         "epoch",
         "training_time_seconds",
         "training_time_hours",
@@ -198,7 +314,11 @@ def load_experiment_table(excel_path: Path, sheet_name: str | None = None) -> pd
 
     for column in [
         "layer2_activation_function",
+        "use_learning_rate_decay",
+        "learning_rate_decay_staircase",
+        "recog_model",
         "learning_rate",
+        "early_stopping_split",
         "layer1_activation_function",
         "overtraining_label",
         "training_classification",
@@ -351,17 +471,29 @@ def normalized_learning_rate(value: object) -> object:
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:
     features = df[FEATURE_COLUMNS].copy()
     features["learning_rate"] = features["learning_rate"].map(normalized_learning_rate)
+    if "early_stopping_split" in features.columns:
+        features["early_stopping_split"] = (
+            features["early_stopping_split"]
+            .fillna("validation")
+            .replace({"N/A": "validation", "nan": "validation"})
+        )
+    if "use_learning_rate_decay" in features.columns:
+        features["use_learning_rate_decay"] = (
+            features["use_learning_rate_decay"]
+            .fillna("False")
+            .replace({"N/A": "False", "nan": "False"})
+        )
+    if "learning_rate_decay_staircase" in features.columns:
+        features["learning_rate_decay_staircase"] = (
+            features["learning_rate_decay_staircase"]
+            .fillna("True")
+            .replace({"N/A": "True", "nan": "True"})
+        )
 
-    categorical_columns = [
-        "layer1_activation_function",
-        "layer2_activation_function",
-        "learning_rate",
-    ]
-
-    for column in categorical_columns:
+    for column in CATEGORICAL_FEATURE_COLUMNS:
         features[column] = features[column].fillna("N/A").astype(str).str.strip()
 
-    numeric_columns = [column for column in features.columns if column not in categorical_columns]
+    numeric_columns = [column for column in features.columns if column not in CATEGORICAL_FEATURE_COLUMNS]
     for column in numeric_columns:
         features[column] = pd.to_numeric(features[column], errors="coerce")
 
@@ -446,6 +578,8 @@ def generate_integer_candidates(
     observed = [int(round(value)) for value in unique_numeric(values)]
     if not observed:
         return []
+    if len(observed) == 1:
+        return sorted(set(observed))
 
     low = min(observed)
     high = max(observed)
@@ -514,6 +648,44 @@ def generate_log_candidates(values: Iterable[object]) -> List[float]:
     return sorted(round(value, 6) for value in candidates if value > 0)
 
 
+def generate_log_candidates_within_observed(values: Iterable[object]) -> List[float]:
+    observed = unique_numeric(values)
+    if not observed:
+        return []
+    positive = [value for value in observed if value > 0]
+    if not positive:
+        return observed
+    if len(positive) == 1:
+        return [round(positive[0], 6)]
+
+    candidates = set(positive)
+    logs = np.log10(np.asarray(positive, dtype=float))
+    for a, b in zip(logs[:-1], logs[1:]):
+        midpoint = float(10 ** ((a + b) / 2.0))
+        if min(positive) <= midpoint <= max(positive):
+            candidates.add(midpoint)
+
+    return sorted(round(value, 6) for value in candidates if value > 0)
+
+
+def generate_bounded_min_delta_candidates(values: Iterable[object]) -> List[float]:
+    observed = unique_numeric(values)
+    positive = sorted(value for value in observed if value > 0)
+    if not positive:
+        return []
+
+    # Guard against extreme outliers in the workbook (for example 100000) that
+    # are technically observed but not realistic for normal early-stopping
+    # behaviour. Keep the historical region, but cap it to a sensible scale.
+    upper_cap = 1000.0
+    filtered = [value for value in positive if value <= upper_cap]
+    if not filtered:
+        filtered = [positive[0]]
+
+    candidates = generate_log_candidates_within_observed(filtered)
+    return candidates or [round(value, 6) for value in filtered]
+
+
 def generate_learning_rate_candidates(values: Iterable[object]) -> List[object]:
     raw_values = [value for value in values if not pd.isna(value)]
     numeric_values: List[float] = []
@@ -532,7 +704,23 @@ def generate_learning_rate_candidates(values: Iterable[object]) -> List[object]:
 
     candidates: List[object] = []
     if numeric_values:
-        candidates.extend(generate_float_candidates(numeric_values, expand_ratio=0.5))
+        unique_numeric_values = sorted(set(float(value) for value in numeric_values if float(value) > 0))
+        if len(unique_numeric_values) == 1:
+            base = unique_numeric_values[0]
+            # Explore around a single observed base learning rate on a log scale.
+            numeric_candidates = sorted(
+                {
+                    round(max(base / 10.0, 1e-6), 6),
+                    round(max(base / 3.162278, 1e-6), 6),
+                    round(base, 6),
+                    round(base * 3.162278, 6),
+                }
+            )
+        else:
+            numeric_candidates = generate_float_candidates(unique_numeric_values, expand_ratio=0.5)
+            numeric_candidates.extend(generate_log_candidates(unique_numeric_values))
+            numeric_candidates = sorted(set(round(float(value), 6) for value in numeric_candidates if float(value) > 0))
+        candidates.extend(numeric_candidates)
     candidates.extend(sorted(set(text_values)))
     return candidates
 
@@ -570,28 +758,61 @@ def build_candidate_grid(
         "patience": DEFAULT_PATIENCE,
         "min_delta": DEFAULT_MIN_DELTA,
     }
+    def observed_integer_space(column: str, fallback: List[int], extend: int = 1) -> List[int]:
+        return generate_integer_candidates(df_features[column], extend=extend) or fallback
+
+    def float_space(column: str, fallback: List[float], log_scaled: bool = False) -> List[float]:
+        candidates = generate_log_candidates(df_features[column]) if log_scaled else generate_float_candidates(df_features[column])
+        return candidates or fallback
+
+    def categorical_space(column: str, fallback: List[object]) -> List[object]:
+        values = unique_sorted(df_features[column])
+        return values or fallback
+
     search_space = {
-        "number_of_layers": generate_integer_candidates(df_features["number_of_layers"], minimum=1, maximum=3),
-        "layer1_activation_function": unique_sorted(df_features["layer1_activation_function"]),
-        "layer1_filters": generate_integer_candidates(df_features["layer1_filters"], minimum=1, maximum=16),
-        "layer1_kernel_size": generate_integer_candidates(df_features["layer1_kernel_size"], minimum=1, maximum=8),
-        "layer1_pool_size": generate_integer_candidates(df_features["layer1_pool_size"], minimum=1, maximum=6),
-        "layer1_stride": generate_integer_candidates(df_features["layer1_stride"], minimum=1, maximum=6),
-        "learning_rate": generate_learning_rate_candidates(df_features["learning_rate"]),
-        "batch_size": generate_integer_candidates(df_features["batch_size"], minimum=4, maximum=64),
-        "patience": generate_integer_candidates(df_features["patience"], minimum=1, maximum=30)
-        or [int(early_stopping_defaults["patience"])],
-        "min_delta": generate_log_candidates(df_features["min_delta"])
-        or [float(early_stopping_defaults["min_delta"])],
+        "number_of_layers": categorical_space("number_of_layers", [1, 2]),
+        "layer1_activation_function": categorical_space("layer1_activation_function", ["sigmoid", "tanh", "ReLU"]),
+        "layer1_filters": observed_integer_space("layer1_filters", [4, 5, 6], extend=1),
+        "layer1_kernel_size": observed_integer_space("layer1_kernel_size", [1, 3], extend=1),
+        "layer1_pool_size": observed_integer_space("layer1_pool_size", [2, 3], extend=1),
+        "layer1_stride": observed_integer_space("layer1_stride", [1, 2, 4], extend=1),
+        "shuffle": categorical_space("shuffle", [10000]),
+        "lik_seq_length_factor": float_space("lik_seq_length_factor", [0.8]),
+        "dim_x": categorical_space("dim_x", [12]),
+        "ind_pnt_num": categorical_space("ind_pnt_num", [100]),
+        "samples": categorical_space("samples", [30]),
+        "use_learning_rate_decay": categorical_space("use_learning_rate_decay", ["False", "True"]),
+        "learning_rate_decay_steps": categorical_space("learning_rate_decay_steps", [1000]),
+        "learning_rate_decay_rate": categorical_space("learning_rate_decay_rate", [0.96]),
+        "learning_rate_decay_staircase": categorical_space("learning_rate_decay_staircase", ["True"]),
+        "recog_len": categorical_space("recog_len", [60]),
+        "recog_model": categorical_space("recog_model", ["conv", "zeros"]),
+        "learning_rate": generate_learning_rate_candidates(df_features["learning_rate"]) or [0.03, "Exponential decay"],
+        "batch_size": observed_integer_space("batch_size", [8, 14, 16], extend=1),
+        "patience": [value for value in (generate_integer_candidates(df_features["patience"], extend=1) or [int(early_stopping_defaults["patience"])]) if 2 <= int(value) <= 8],
+        "min_delta": generate_bounded_min_delta_candidates(df_features["min_delta"]) or [float(early_stopping_defaults["min_delta"])],
+        "early_stopping_split": categorical_space("early_stopping_split", ["validation"]),
+        "validation_fraction": categorical_space("validation_fraction", [0.1]),
+        "zeta_pos": categorical_space("zeta_pos", [2.0]),
+        "zeta_mean": categorical_space("zeta_mean", [0.01]),
+        "zeta_var": categorical_space("zeta_var", [0.01]),
+        "var_x": categorical_space("var_x", [2.5e-05]),
+        "var_y": categorical_space("var_y", [0.0025]),
+        "gp_var": categorical_space("gp_var", [0.25]),
+        "gp_len": categorical_space("gp_len", [2.0]),
+        "epochs": categorical_space("epochs", [500]),
     }
 
     layer2_space = {
-        "layer2_activation_function": unique_sorted(df_features["layer2_activation_function"]),
-        "layer2_filters": generate_integer_candidates(df_features["layer2_filters"], minimum=1, maximum=16),
-        "layer2_kernel_size": generate_integer_candidates(df_features["layer2_kernel_size"], minimum=1, maximum=8),
-        "layer2_pool_size": generate_integer_candidates(df_features["layer2_pool_size"], minimum=1, maximum=6),
-        "layer2_stride": generate_integer_candidates(df_features["layer2_stride"], minimum=1, maximum=6),
+        "layer2_activation_function": categorical_space("layer2_activation_function", ["tanh"]),
+        "layer2_filters": observed_integer_space("layer2_filters", [15], extend=1),
+        "layer2_kernel_size": observed_integer_space("layer2_kernel_size", [6], extend=1),
+        "layer2_pool_size": observed_integer_space("layer2_pool_size", [5], extend=1),
+        "layer2_stride": observed_integer_space("layer2_stride", [2], extend=1),
     }
+
+    if not search_space["patience"]:
+        search_space["patience"] = [int(early_stopping_defaults["patience"])]
 
     rng = np.random.RandomState(random_state)
 
@@ -622,6 +843,9 @@ def build_candidate_grid(
         else:
             for key in layer2_keys:
                 row[key] = rng.choice(layer2_space[key])
+
+        if str(row.get("use_learning_rate_decay")).strip().lower() in {"false", "0", "no"}:
+            row["learning_rate"] = 0.03 if "Exponential decay" == row.get("learning_rate") else row.get("learning_rate")
 
         signature = tuple("N/A" if pd.isna(row[col]) else str(row[col]) for col in FEATURE_COLUMNS)
         if signature in seen:

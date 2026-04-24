@@ -18,9 +18,12 @@ class Trainer:
         self.train_all = []
         self.test_all = []
 
-    def _save_checkpoint(self, saver, sess, checkpoint_path, log, retries=3):
+    def _save_checkpoint(self, saver, sess, checkpoint_path, log, retries=8):
         meta_path = checkpoint_path + '.meta'
         write_meta_graph = not os.path.exists(meta_path)
+        checkpoint_dir = os.path.dirname(checkpoint_path)
+        if checkpoint_dir:
+            os.makedirs(checkpoint_dir, exist_ok=True)
 
         for attempt in range(retries):
             try:
@@ -38,10 +41,10 @@ class Trainer:
                 # On Windows, antivirus/sync tools can momentarily lock checkpoint files.
                 # After the first attempt, avoid rewriting the meta graph entirely.
                 write_meta_graph = False
-                time.sleep(1.0)
+                time.sleep(min(5.0, 1.0 + attempt))
 
     def train(self, ds, epochs, retrain=False, test_data=False,
-              early_stopping=True, patience=2, min_delta=3.162278):
+              early_stopping=True, patience=2, min_delta=3.162278, evaluation_split="validation"):
         print('\nTraining...\n')
 
         training_start_time = time.time()
@@ -71,19 +74,32 @@ class Trainer:
             # config.inter_op_parallelism_threads = 10
 
             with tf.Session(config=config) as sess:
+                restore_path = os.path.join(self.model_dir, 'model.ckpt')
+                best_train_ckpt = os.path.join(self.out_dir, 'best.ckpt')
+                best_eval_ckpt = os.path.join(self.out_dir, 'best_eval.ckpt')
+                final_ckpt = os.path.join(self.out_dir, 'model.ckpt')
 
                 if retrain:
-                    model.saver.restore(sess, self.model_dir + 'model.ckpt')
-                    log('Restored existing checkpoint from {}model.ckpt'.format(self.model_dir))
+                    model.saver.restore(sess, restore_path)
+                    log('Restored existing checkpoint from {}'.format(restore_path))
                 else:
                     sess.run(model.init)
                     log('Initialized new model.')
 
                 lowest_train = float('inf')
-                best_test = float('inf')
+                best_eval = float('inf')
                 wait = 0
                 stopped_early = False
                 best_epoch = -1
+                evaluation_split = str(evaluation_split).strip().lower()
+                use_validation = (
+                    evaluation_split == "validation"
+                    and hasattr(ds, "val_in_batch")
+                    and np.size(ds.val_in_batch) > 0
+                )
+                eval_in_batch = ds.val_in_batch if use_validation else ds.test_in_batch
+                eval_out_batch = ds.val_out_batch if use_validation else ds.test_out_batch
+                eval_label = "Validation" if use_validation else "Test"
 
                 for epoch in tqdm(range(epochs)):
                     epoch_start_time = time.time()
@@ -100,7 +116,7 @@ class Trainer:
                     # Test
                     # --------------------
                     if test_data:
-                        model.load_ds(sess, ds.test_in_batch, ds.test_out_batch)
+                        model.load_ds(sess, eval_in_batch, eval_out_batch)
                         test_loss = model.run(sess, model.loss)
                         test_loss = np.mean(test_loss)
                         self.test_all.append(test_loss)
@@ -121,8 +137,9 @@ class Trainer:
                     # --------------------
                     # Log current epoch
                     # --------------------
-                    log('[{epoch:04}]: Train {train:.6f}, Test {test:.6f}'.format(
+                    log('[{epoch:04}]: Train {train:.6f}, {eval_name} {test:.6f}'.format(
                         epoch=epoch, train=train_loss, test=test_loss
+                        , eval_name=eval_label
                     ))
                     log('  -> Epoch time: {:.2f}s | Elapsed: {:.2f} min | Est remaining: {:.2f} min'.format(
                         epoch_time,
@@ -134,7 +151,7 @@ class Trainer:
                     # Save best training-loss checkpoint
                     # --------------------
                     if train_loss < lowest_train:
-                        self._save_checkpoint(model.saver, sess, self.out_dir + '/best.ckpt', log)
+                        self._save_checkpoint(model.saver, sess, best_train_ckpt, log)
                         lowest_train = train_loss
                         log('  -> New best training loss. Saved best.ckpt')
 
@@ -142,27 +159,34 @@ class Trainer:
                     # Early stopping based on test loss
                     # --------------------
                     if early_stopping and test_data:
-                        if test_loss < (best_test - min_delta):
-                            best_test = test_loss
+                        if test_loss < (best_eval - min_delta):
+                            best_eval = test_loss
                             best_epoch = epoch
                             wait = 0
-                            self._save_checkpoint(model.saver, sess, self.out_dir + '/best_test.ckpt', log)
-                            log('  -> New best test loss. Saved best_test.ckpt')
+                            self._save_checkpoint(model.saver, sess, best_eval_ckpt, log)
+                            log('  -> New best {} loss. Saved best_eval.ckpt'.format(eval_label.lower()))
                         else:
                             wait += 1
-                            log('  -> No significant test improvement for {} epoch(s).'.format(wait))
+                            log('  -> No significant {} improvement for {} epoch(s).'.format(
+                                eval_label.lower(),
+                                wait,
+                            ))
 
                         if wait >= patience:
                             log('')
                             log('Early stopping triggered at epoch {}.'.format(epoch))
-                            log('Best test loss was {:.6f} at epoch {}.'.format(best_test, best_epoch))
+                            log('Best {} loss was {:.6f} at epoch {}.'.format(
+                                eval_label.lower(),
+                                best_eval,
+                                best_epoch,
+                            ))
                             stopped_early = True
                             break
 
                 # --------------------
                 # Save final checkpoint
                 # --------------------
-                self._save_checkpoint(model.saver, sess, self.out_dir + '/model.ckpt', log)
+                self._save_checkpoint(model.saver, sess, final_ckpt, log)
                 log('Saved final checkpoint: model.ckpt')
 
                 # --------------------

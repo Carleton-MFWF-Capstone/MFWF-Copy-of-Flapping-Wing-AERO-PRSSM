@@ -10,6 +10,27 @@ from .gp_tf import MATERN32, conditional
 from .base_model import BaseModel
 
 
+def resolve_activation(name):
+    if name is None:
+        return None
+
+    activation_name = str(name).strip().lower()
+    activations = {
+        "tanh": tf.nn.tanh,
+        "sigmoid": tf.nn.sigmoid,
+        "relu": tf.nn.relu,
+        "elu": tf.nn.elu,
+        "selu": tf.nn.selu,
+        "softplus": tf.nn.softplus,
+        "none": None,
+        "linear": None,
+        "identity": None,
+    }
+    if activation_name not in activations:
+        raise ValueError("Unsupported activation function: {}".format(name))
+    return activations[activation_name]
+
+
 class PRSSM(BaseModel):
 
     def __init__(self, dim_u, dim_y, config):
@@ -176,37 +197,91 @@ class PRSSM(BaseModel):
             sample_uy = sample_uy[:, :recog_len, :]
             sample_uy = tf.cast(sample_uy, tf.float32)
 
+            def valid_conv_output_length(input_length, kernel_size):
+                return input_length - kernel_size + 1
+
+            def valid_pool_output_length(input_length, pool_size, stride):
+                return ((input_length - pool_size) // stride) + 1
+
             # Controls how many convolution blocks are used in the recognition model.
             # Use 1 to run only the first conv/pooling block.
             # Use 2 (or any value > 1) to also run the second conv/pooling block below.
             number_of_layers = int(self.config.get('number_of_layers', 1))
+            layer1_activation = resolve_activation(self.config.get('layer1_activation_function', 'sigmoid'))
+            layer1_filters = int(self.config.get('layer1_filters', 6))
+            layer1_kernel_size = int(self.config.get('layer1_kernel_size', 3))
+            layer1_pool_size = int(self.config.get('layer1_pool_size', 2))
+            layer1_stride = int(self.config.get('layer1_stride', 4))
 
             # First convolution block:
-            # - 7 is the number of learned filters/features produced by this layer.
-            # - 2 is the kernel size, so each filter looks at 2 time steps at once.
-            # - tf.nn.tanh is the activation function applied after the convolution.
-            layer1 = tf.layers.conv1d(sample_uy, 6, 3, activation=tf.nn.sigmoid)
+            # - layer1_filters is the number of learned filters/features produced by this layer.
+            # - layer1_kernel_size is the kernel size, so each filter looks at that many time steps at once.
+            # - layer1_activation is the activation function applied after the convolution.
+            layer1 = tf.layers.conv1d(
+                sample_uy,
+                layer1_filters,
+                layer1_kernel_size,
+                activation=layer1_activation,
+            )
             # First pooling block:
-            # - 1 is the pool size.
-            # - 2 is the pooling stride, which downsamples along the time axis.
-            pool1 = tf.layers.max_pooling1d(layer1, 2, 4)
+            # - layer1_pool_size is the pool size.
+            # - layer1_stride is the pooling stride, which downsamples along the time axis.
+            pool1 = tf.layers.max_pooling1d(layer1, layer1_pool_size, layer1_stride)
 
             # If number_of_layers <= 1, the model stops here and uses only the first
             # conv/pooling block for the recognition features.
             if number_of_layers <= 1:
                 recog_features = pool1
+                feature_time_length = valid_pool_output_length(
+                    valid_conv_output_length(recog_len, layer1_kernel_size),
+                    layer1_pool_size,
+                    layer1_stride,
+                )
+                feature_channels = layer1_filters
             else:
+                layer2_activation = resolve_activation(self.config.get('layer2_activation_function', 'tanh'))
+                layer2_filters = int(self.config.get('layer2_filters', 15))
+                layer2_kernel_size = int(self.config.get('layer2_kernel_size', 6))
+                layer2_pool_size = int(self.config.get('layer2_pool_size', 5))
+                layer2_stride = int(self.config.get('layer2_stride', 2))
+
                 # Second convolution block:
-                # - 15 is the number of learned filters/features in the second layer.
-                # - 6 is the kernel size for the second temporal convolution.
-                layer2 = tf.layers.conv1d(pool1, 15, 6, activation=tf.nn.tanh)
+                # - layer2_filters is the number of learned filters/features in the second layer.
+                # - layer2_kernel_size is the kernel size for the second temporal convolution.
+                layer2 = tf.layers.conv1d(
+                    pool1,
+                    layer2_filters,
+                    layer2_kernel_size,
+                    activation=layer2_activation,
+                )
                 # Second pooling block:
-                # - 5 is the pool size.
-                # - 2 is the pooling stride.
-                recog_features = tf.layers.max_pooling1d(layer2, 5, 2)
+                # - layer2_pool_size is the pool size.
+                # - layer2_stride is the pooling stride.
+                recog_features = tf.layers.max_pooling1d(layer2, layer2_pool_size, layer2_stride)
+                feature_time_length = valid_pool_output_length(
+                    valid_conv_output_length(
+                        valid_pool_output_length(
+                            valid_conv_output_length(recog_len, layer1_kernel_size),
+                            layer1_pool_size,
+                            layer1_stride,
+                        ),
+                        layer2_kernel_size,
+                    ),
+                    layer2_pool_size,
+                    layer2_stride,
+                )
+                feature_channels = layer2_filters
+
+            if feature_time_length <= 0:
+                raise ValueError(
+                    "Recognition conv geometry is invalid for recog_len={} with the configured "
+                    "kernel/pooling sizes.".format(recog_len)
+                )
 
             # Flatten collapses the conv feature map into a single vector per sample.
-            recog_flat = tf.layers.flatten(recog_features)
+            # The shape is computed explicitly so Dense always receives a defined last dimension.
+            flat_feature_dim = int(feature_time_length * feature_channels)
+            recog_flat = tf.reshape(recog_features, [-1, flat_feature_dim])
             # Dense projects the flattened recognition features into the latent-state
             # dimension dim_x, which is used to initialize x_0.
             recog_dense = tf.layers.dense(recog_flat, self.dim_x)

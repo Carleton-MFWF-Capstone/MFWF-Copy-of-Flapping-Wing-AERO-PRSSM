@@ -1,131 +1,91 @@
-import os
 import json
 import time
 from pathlib import Path
-from database.data_manager import FlappingWingAerodynamics
-from training.trainer import Trainer
-from outputs.outputs import Outputs
-from outputs.postprocess_model_outputs import run_for_output_dir
-from model.prssm import PRSSM
 
-# model
-model_sel = PRSSM
+from experiment_runner import (
+    build_experiment_config,
+    get_default_output_root,
+    load_training_config,
+    resolve_output_dir,
+    run_experiment,
+)
 
-# dataset
-ds_sel = FlappingWingAerodynamics  # set to your new dataset class - create your own
-seq_len = 470  # length of sub-trajectories for training
-lik_seq_length_factor = 0.8
-predict_len = int(seq_len * lik_seq_length_factor)
-seq_stride = seq_len    # distance between two sub-trajectories, in this application sub-trajectories are completely
-# separate
 
-# directories
-parent_dir = os.path.dirname(os.getcwd())
-in_dir = parent_dir + '/Data/Input/'
-out_dir = parent_dir + '/Data/Output/' + 'Output_folder_earlystopX/'  # Replace the folder name with the desired one
-model_dir = out_dir[:]
+DEFAULT_OUTPUT_NAME = "Output_folder_earlystopX"
 
-if not os.path.exists(out_dir):
-    os.makedirs(out_dir)
 
-# training settings
-num_gpus = 1  # (for multi-GPU //// not implemented in this version needs improvement)
-gpus = ['/device:GPU:' + str(x) for x in range(num_gpus)]
-epochs = 500  # number of epochs for training (make sure in training plot afterwards that converged)
-test_data = True
+def main():
+    default_overrides = {"output_name": DEFAULT_OUTPUT_NAME}
+    default_config = build_experiment_config(default_overrides)
+    default_out_dir = resolve_output_dir(default_config, output_name=DEFAULT_OUTPUT_NAME)
+    config_path = default_out_dir / "training_config.json"
 
-# config
-answer = input('Start a new simulation? [Y/N]\n')
-if answer.upper() in ["Y", "YES"]:
-    print('Starting a new simulation. The config files are updated...')
-    train = True
-    retrain = False
-    model_config = {
-        # dataset
-        'batch_size': 14,  # batch size
-        'shuffle': 10000,  # shuffle buffer size
-        'lik_seq_length_factor': lik_seq_length_factor,
-        # method
-        'dim_x': 12,  # dimensionality of latent state
-        'ind_pnt_num': 100,  # number of inducing points
-        'samples': 30,  # number of particles
-        'learning_rate': 0.03,
-        'use_learning_rate_decay': False,
-        'recog_len': 60,  # 2*t' in paper, number of steps for recognition model
-        'recog_model': 'zeros',
-        'number_of_layers': 1,
-        'zeta_pos': 2.,
-        'zeta_mean': 0.1 ** 2,
-        'zeta_var': 0.1 ** 2,
-        'var_x': 0.005 ** 2,
-        'var_y': 0.05 ** 2,
-        'gp_var': 0.5 ** 2,
-        'gp_len': 2.,
-        # computation
-        'gpus': gpus,
-        'epochs': epochs,
-        # directories
-        'in_dir': in_dir,
-        'out_dir': out_dir
-    }
+    answer = input('Start a new simulation? [Y/N]\n').strip().upper()
+    if answer in {"Y", "YES"}:
+        print('Starting a new simulation. The config files are updated...')
+        result = run_experiment(
+            overrides=default_overrides,
+            output_name=DEFAULT_OUTPUT_NAME,
+            retrain=False,
+            train=True,
+            run_postprocess=True,
+        )
+        print('Number of epochs:' + str(default_config['epochs']))
+        print('Latent state dim:' + str(default_config['dim_x']))
+        print('Outputs saved to:' + result['out_dir'])
+        time.sleep(2)
+        return
 
-    with open(out_dir + 'training_config.json', 'w') as fout:
-        json.dump(model_config, fout)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            "Could not find an existing training_config.json at {}".format(config_path)
+        )
 
-    print('Number of epochs:' + str(epochs))
+    model_config = load_training_config(config_path)
+    print('Loaded existing configuration from {}'.format(config_path))
+    print('Number of epochs:' + str(model_config['epochs']))
     print('Latent state dim:' + str(model_config['dim_x']))
-    time.sleep(5)
+    time.sleep(2)
 
-elif answer.upper() in ["N", "NO"]:
-    with open(out_dir + 'training_config.json', "r") as read_file:
-        model_config = json.load(read_file)
-
-    answer2 = input('Retrain? [Y/N]\n')
-    if answer2.upper() in ["Y", "YES"]:
+    answer2 = input('Retrain? [Y/N]\n').strip().upper()
+    if answer2 in {"Y", "YES"}:
         print('Continuing an old simulation. The configuration is uploaded...')
-        train = True
-        retrain = True
-        print('Creating new folder for the retrained folder')
-        out_dir = model_config['out_dir'][:-1] + '_RT/'
-        if not os.path.exists(out_dir):
-            os.makedirs(out_dir)
-        model_config['out_dir'] = out_dir
-        model_config['epochs'] = epochs
-        with open(out_dir + 'training_config.json', 'w') as fout:
-            json.dump(model_config, fout)
+        retrain_output_name = Path(model_config['out_dir']).name.rstrip("/\\") + '_RT'
+        overrides = dict(model_config)
+        overrides["output_root"] = str(get_default_output_root())
+        overrides["output_name"] = retrain_output_name
+        overrides["in_dir"] = model_config["in_dir"]
+        result = run_experiment(
+            overrides=overrides,
+            output_name=retrain_output_name,
+            retrain=True,
+            train=True,
+            run_postprocess=True,
+        )
+        print('Outputs saved to:' + result['out_dir'])
+        time.sleep(2)
+        return
 
-        print('Number of epochs:' + str(epochs))
-        print('Latent state dim:' + str(model_config['dim_x']))
-        time.sleep(5)
-
-    elif answer2.upper() in ["N", "NO"]:
+    if answer2 in {"N", "NO"}:
         print('Predictions from an old simulation. The configuration is uploaded...')
-        print('Number of epochs:' + str(epochs))
-        print('Latent state dim:' + str(model_config['dim_x']))
-        time.sleep(5)
-        train = False
-        retrain = False
+        existing_output_name = Path(model_config['out_dir']).name.rstrip("/\\")
+        overrides = dict(model_config)
+        overrides["output_root"] = str(get_default_output_root())
+        overrides["output_name"] = existing_output_name
+        overrides["in_dir"] = model_config["in_dir"]
+        result = run_experiment(
+            overrides=overrides,
+            output_name=existing_output_name,
+            retrain=False,
+            train=False,
+            run_postprocess=True,
+        )
+        print('Outputs saved to:' + result['out_dir'])
+        time.sleep(2)
+        return
 
-model_config.update({'ds': ds_sel})
+    raise ValueError("Invalid response for retrain prompt.")
 
-# evaluation
-output_sel = Outputs  # can create new class deriving from it if need richer outputs
 
-#
-# Run
-#
-# load
-outputs = output_sel(out_dir)
-ds = ds_sel(seq_len, seq_stride, in_dir)
-outputs.set_ds(ds)
-model = model_sel(ds.dim_u, ds.dim_y, model_config)
-outputs.set_model(model, predict_len, model_config['dim_x'])
-# train
-if train:
-    trainer = Trainer(model, model_dir)
-    trainer.train(ds, epochs, retrain=retrain, test_data=test_data)
-    outputs.set_trainer(trainer)
-
-# evaluate
-outputs.create_all()
-run_for_output_dir(Path(out_dir), show_plots=False)
+if __name__ == "__main__":
+    main()

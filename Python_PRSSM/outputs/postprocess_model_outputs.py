@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -17,15 +18,34 @@ from scipy.io import loadmat
 # USER SETTINGS
 # ============================================================
 
-OUT_DIR = Path(
-    r"C:\Files from USB\Carleton Year 5\MAAE 4907-N (Capstone Project - Micro Flapping-Wing Flyer (MFWF))\Neural Network (Fall 2025 - Winter 2026)\Data\Output\Output_folder_earlystopX"
-)
+def get_repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def get_shared_data_root() -> Path:
+    return get_repo_root().parent / "Data"
+
+
+def get_output_roots() -> List[Path]:
+    return [get_shared_data_root() / "Output"]
+
+
+def build_default_out_dir(out_folder_name: str = "Output_folder_earlystopX") -> Path:
+    for root in get_output_roots():
+        candidate = root / out_folder_name
+        if candidate.exists():
+            return candidate
+    return get_output_roots()[0] / out_folder_name
+
+
+OUT_DIR = build_default_out_dir()
 
 TRAINING_LOG_FILE = OUT_DIR / "training_log.txt"
 MAT_DIR = OUT_DIR / "matfiles"
 
 FIG_DIR = OUT_DIR / "figures"
 METRICS_FILE = OUT_DIR / "metrics_summary.csv"
+TRAINING_CONFIG_FILE = OUT_DIR / "training_config.json"
 
 SHOW_PLOTS = True
 
@@ -123,6 +143,18 @@ def read_text_long(path: Path, encoding: str = "utf-8") -> str:
     long_path = to_windows_long_path(path)
     with open(long_path, "r", encoding=encoding, errors="ignore") as f:
         return f.read()
+
+
+def get_evaluation_loss_label() -> str:
+    if path_exists_long(TRAINING_CONFIG_FILE):
+        try:
+            config = json.loads(read_text_long(TRAINING_CONFIG_FILE))
+            split = str(config.get("early_stopping_split", "")).strip().lower()
+            if split == "validation":
+                return "Validation Loss"
+        except Exception:
+            pass
+    return "Testing Loss"
 
 
 # ============================================================
@@ -288,7 +320,7 @@ def parse_training_log(log_file: Path) -> Tuple[pd.DataFrame, Dict[str, float]]:
     lines = text.splitlines()
 
     epoch_pattern = re.compile(
-        r"\[(\d+)\]:\s*Train\s+([0-9eE+\-.]+),\s*Test\s+([0-9eE+\-.]+)"
+        r"\[(\d+)\]:\s*Train\s+([0-9eE+\-.]+),\s*(?:Test|Validation|Eval)\s+([0-9eE+\-.]+)"
     )
     time_pattern = re.compile(
         r"Epoch time:\s*([0-9eE+\-.]+)s\s*\|\s*Elapsed:\s*([0-9eE+\-.]+)\s*min"
@@ -297,7 +329,8 @@ def parse_training_log(log_file: Path) -> Tuple[pd.DataFrame, Dict[str, float]]:
         r"Total training time:\s*([0-9eE+\-.]+)\s*seconds"
     )
     best_test_pattern = re.compile(
-        r"Best test loss was\s*([0-9eE+\-.]+)\s*at epoch\s*(\d+)"
+        r"Best (?:test|validation|evaluation) loss was\s*([0-9eE+\-.]+)\s*at epoch\s*(\d+)",
+        flags=re.IGNORECASE,
     )
     diagnosis_pattern = re.compile(
         r"Training diagnosis:\s*(.+)"
@@ -548,10 +581,11 @@ def finalize_figure(fig: plt.Figure, save_path: Path) -> None:
 # ============================================================
 
 def plot_loss_vs_epoch_log(history_df: pd.DataFrame, save_path: Path) -> None:
+    evaluation_loss_label = get_evaluation_loss_label()
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(history_df["epoch"], history_df["train_loss"], label="Training Loss")
-    ax.plot(history_df["epoch"], history_df["test_loss"], label="Testing Loss")
-    ax.set_title("Training and Testing Loss vs Epoch (Log Scale)")
+    ax.plot(history_df["epoch"], history_df["test_loss"], label=evaluation_loss_label)
+    ax.set_title(f"Training and {evaluation_loss_label.replace(' Loss', '')} Loss vs Epoch (Log Scale)")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
     ax.set_yscale("log")
@@ -561,10 +595,11 @@ def plot_loss_vs_epoch_log(history_df: pd.DataFrame, save_path: Path) -> None:
 
 
 def plot_loss_vs_epoch_zoomed(history_df: pd.DataFrame, save_path: Path) -> None:
+    evaluation_loss_label = get_evaluation_loss_label()
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(history_df["epoch"], history_df["train_loss"], label="Training Loss")
-    ax.plot(history_df["epoch"], history_df["test_loss"], label="Testing Loss")
-    ax.set_title("Training and Testing Loss vs Epoch (Zoomed Linear Scale)")
+    ax.plot(history_df["epoch"], history_df["test_loss"], label=evaluation_loss_label)
+    ax.set_title(f"Training and {evaluation_loss_label.replace(' Loss', '')} Loss vs Epoch (Zoomed Linear Scale)")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
 
@@ -648,6 +683,138 @@ def plot_parity(
 
     finalize_figure(fig, save_path)
     return r2, rmse, envelope
+
+
+def plot_residuals(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    variable_name: str,
+    split_name: str,
+    save_path: Path,
+) -> Tuple[float, float]:
+    residual = np.asarray(y_pred, dtype=float).ravel() - np.asarray(y_true, dtype=float).ravel()
+    x = np.asarray(y_true, dtype=float).ravel()
+    bias = float(np.mean(residual))
+    residual_std = float(np.std(residual))
+
+    fig, ax = plt.subplots(figsize=(7.5, 5.5))
+    ax.scatter(x, residual, alpha=0.25, s=8)
+    ax.axhline(0.0, linestyle="--", linewidth=1.2, label="Zero Error")
+    ax.axhline(bias, linestyle=":", linewidth=1.2, label=f"Mean Residual = {bias:.6f}")
+    display_name = format_output_label(variable_name)
+    ax.set_title(f"{split_name} Residual Plot - {display_name}")
+    ax.set_xlabel(f"True {variable_name}")
+    ax.set_ylabel("Residual (Predicted - True)")
+    ax.grid(True, alpha=0.3)
+    txt = f"N = {len(x)}\nMean residual = {bias:.6f}\nResidual std = {residual_std:.6f}"
+    ax.text(0.05, 0.95, txt, transform=ax.transAxes, va="top", bbox=dict(boxstyle="round", alpha=0.2))
+    ax.legend(loc="best")
+    finalize_figure(fig, save_path)
+    return bias, residual_std
+
+
+def plot_error_vs_true(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    variable_name: str,
+    split_name: str,
+    save_path: Path,
+) -> Tuple[float, float]:
+    x = np.asarray(y_true, dtype=float).ravel()
+    abs_err = np.abs(np.asarray(y_pred, dtype=float).ravel() - x)
+    mean_abs_err = float(np.mean(abs_err))
+    p98_abs_err = float(np.percentile(abs_err, 98.0))
+
+    fig, ax = plt.subplots(figsize=(7.5, 5.5))
+    ax.scatter(x, abs_err, alpha=0.25, s=8)
+    ax.axhline(mean_abs_err, linestyle="--", linewidth=1.2, label=f"Mean Abs. Error = {mean_abs_err:.6f}")
+    display_name = format_output_label(variable_name)
+    ax.set_title(f"{split_name} Absolute Error vs True Value - {display_name}")
+    ax.set_xlabel(f"True {variable_name}")
+    ax.set_ylabel("Absolute Error")
+    ax.grid(True, alpha=0.3)
+    txt = f"N = {len(x)}\nMean abs. error = {mean_abs_err:.6f}\n98th pct. abs. error = {p98_abs_err:.6f}"
+    ax.text(0.05, 0.95, txt, transform=ax.transAxes, va="top", bbox=dict(boxstyle="round", alpha=0.2))
+    ax.legend(loc="best")
+    finalize_figure(fig, save_path)
+    return mean_abs_err, p98_abs_err
+
+
+def plot_error_histogram(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    variable_name: str,
+    split_name: str,
+    save_path: Path,
+) -> Tuple[float, float]:
+    residual = np.asarray(y_pred, dtype=float).ravel() - np.asarray(y_true, dtype=float).ravel()
+    bias = float(np.mean(residual))
+    residual_std = float(np.std(residual))
+
+    fig, ax = plt.subplots(figsize=(7.5, 5.5))
+    ax.hist(residual, bins=40, alpha=0.8)
+    ax.axvline(0.0, linestyle="--", linewidth=1.2, label="Zero Error")
+    ax.axvline(bias, linestyle=":", linewidth=1.2, label=f"Mean Residual = {bias:.6f}")
+    display_name = format_output_label(variable_name)
+    ax.set_title(f"{split_name} Error Histogram - {display_name}")
+    ax.set_xlabel("Residual (Predicted - True)")
+    ax.set_ylabel("Count")
+    ax.grid(True, alpha=0.3)
+    txt = f"N = {len(residual)}\nMean residual = {bias:.6f}\nResidual std = {residual_std:.6f}"
+    ax.text(0.05, 0.95, txt, transform=ax.transAxes, va="top", bbox=dict(boxstyle="round", alpha=0.2))
+    ax.legend(loc="best")
+    finalize_figure(fig, save_path)
+    return bias, residual_std
+
+
+def plot_combined_diagnostic_grid(
+    gt_train: np.ndarray,
+    pred_train: np.ndarray,
+    gt_test: np.ndarray,
+    pred_test: np.ndarray,
+    variable_names: List[str],
+    save_path: Path,
+    plot_kind: str,
+) -> None:
+    n_vars = len(variable_names)
+    fig, axes = plt.subplots(nrows=n_vars, ncols=2, figsize=(13, 4.8 * n_vars), squeeze=False)
+
+    for j, var_name in enumerate(variable_names):
+        for col, (split_name, y_true, y_pred) in enumerate([
+            ("Train", gt_train[:, j], pred_train[:, j]),
+            ("Test", gt_test[:, j], pred_test[:, j]),
+        ]):
+            ax = axes[j, col]
+            y_true = np.asarray(y_true, dtype=float).ravel()
+            y_pred = np.asarray(y_pred, dtype=float).ravel()
+            residual = y_pred - y_true
+            display_name = format_output_label(var_name)
+
+            if plot_kind == "residual":
+                ax.scatter(y_true, residual, alpha=0.25, s=8)
+                ax.axhline(0.0, linestyle="--", linewidth=1.2)
+                ax.set_xlabel(f"True {var_name}")
+                ax.set_ylabel("Residual")
+                title = f"{split_name} Residual - {display_name}"
+            elif plot_kind == "error_vs_true":
+                abs_err = np.abs(residual)
+                ax.scatter(y_true, abs_err, alpha=0.25, s=8)
+                ax.set_xlabel(f"True {var_name}")
+                ax.set_ylabel("Absolute Error")
+                title = f"{split_name} Abs. Error - {display_name}"
+            elif plot_kind == "histogram":
+                ax.hist(residual, bins=40, alpha=0.8)
+                ax.axvline(0.0, linestyle="--", linewidth=1.2)
+                ax.set_xlabel("Residual")
+                ax.set_ylabel("Count")
+                title = f"{split_name} Error Histogram - {display_name}"
+            else:
+                raise ValueError(f"Unsupported plot_kind: {plot_kind}")
+
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+
+    finalize_figure(fig, save_path)
 
 
 def plot_combined_parity_grid(
@@ -919,15 +1086,16 @@ def plot_training_time_vs_accuracy(
     save_path_epoch: Path,
     save_path_total: Path,
 ) -> None:
+    evaluation_loss_label = get_evaluation_loss_label()
     if "epoch_time_sec" in history_df.columns and history_df["epoch_time_sec"].notna().any():
         epoch_df = history_df.copy()
         epoch_df["cumulative_time_sec"] = epoch_df["epoch_time_sec"].fillna(0.0).cumsum()
 
         fig, ax = plt.subplots(figsize=(9, 5))
-        ax.plot(epoch_df["cumulative_time_sec"], epoch_df["test_loss"], label="Testing Loss")
-        ax.set_title("Testing Loss vs Cumulative Training Time")
+        ax.plot(epoch_df["cumulative_time_sec"], epoch_df["test_loss"], label=evaluation_loss_label)
+        ax.set_title(f"{evaluation_loss_label} vs Cumulative Training Time")
         ax.set_xlabel("Cumulative Training Time [s]")
-        ax.set_ylabel("Testing Loss")
+        ax.set_ylabel(evaluation_loss_label)
         ax.grid(True, alpha=0.3)
         ax.legend()
         finalize_figure(fig, save_path_epoch)
@@ -1054,6 +1222,51 @@ def main() -> Dict[str, object]:
             "envelope_98_abs_error": env,
         })
 
+        bias, residual_std = plot_residuals(
+            gt_train[:, j],
+            pred_train[:, j],
+            var_name,
+            "Train",
+            FIG_DIR / f"residual_train_{var_name}.png",
+        )
+        metrics_rows.append({
+            "split": "train",
+            "variable": var_name,
+            "parity_plot_version": "residual_plot",
+            "mean_residual": bias,
+            "residual_std": residual_std,
+        })
+
+        mean_abs_err, p98_abs_err = plot_error_vs_true(
+            gt_train[:, j],
+            pred_train[:, j],
+            var_name,
+            "Train",
+            FIG_DIR / f"error_vs_true_train_{var_name}.png",
+        )
+        metrics_rows.append({
+            "split": "train",
+            "variable": var_name,
+            "parity_plot_version": "error_vs_true",
+            "mean_absolute_error": mean_abs_err,
+            "percentile_98_absolute_error": p98_abs_err,
+        })
+
+        bias, residual_std = plot_error_histogram(
+            gt_train[:, j],
+            pred_train[:, j],
+            var_name,
+            "Train",
+            FIG_DIR / f"error_hist_train_{var_name}.png",
+        )
+        metrics_rows.append({
+            "split": "train",
+            "variable": var_name,
+            "parity_plot_version": "error_histogram",
+            "mean_residual": bias,
+            "residual_std": residual_std,
+        })
+
         r2, rmse, env = plot_parity(
             gt_test[:, j],
             pred_test[:, j],
@@ -1068,6 +1281,51 @@ def main() -> Dict[str, object]:
             "r2": r2,
             "rmse": rmse,
             "envelope_98_abs_error": env,
+        })
+
+        bias, residual_std = plot_residuals(
+            gt_test[:, j],
+            pred_test[:, j],
+            var_name,
+            "Test",
+            FIG_DIR / f"residual_test_{var_name}.png",
+        )
+        metrics_rows.append({
+            "split": "test",
+            "variable": var_name,
+            "parity_plot_version": "residual_plot",
+            "mean_residual": bias,
+            "residual_std": residual_std,
+        })
+
+        mean_abs_err, p98_abs_err = plot_error_vs_true(
+            gt_test[:, j],
+            pred_test[:, j],
+            var_name,
+            "Test",
+            FIG_DIR / f"error_vs_true_test_{var_name}.png",
+        )
+        metrics_rows.append({
+            "split": "test",
+            "variable": var_name,
+            "parity_plot_version": "error_vs_true",
+            "mean_absolute_error": mean_abs_err,
+            "percentile_98_absolute_error": p98_abs_err,
+        })
+
+        bias, residual_std = plot_error_histogram(
+            gt_test[:, j],
+            pred_test[:, j],
+            var_name,
+            "Test",
+            FIG_DIR / f"error_hist_test_{var_name}.png",
+        )
+        metrics_rows.append({
+            "split": "test",
+            "variable": var_name,
+            "parity_plot_version": "error_histogram",
+            "mean_residual": bias,
+            "residual_std": residual_std,
         })
 
         r2, rmse, slope, intercept, slope_difference, env_fit = plot_parity_with_best_fit(
@@ -1130,6 +1388,33 @@ def main() -> Dict[str, object]:
         variable_names=variable_names,
         save_path=FIG_DIR / "combined_parity_grid_with_best_fit.png",
     )
+    plot_combined_diagnostic_grid(
+        gt_train=gt_train,
+        pred_train=pred_train,
+        gt_test=gt_test,
+        pred_test=pred_test,
+        variable_names=variable_names,
+        save_path=FIG_DIR / "combined_residual_grid.png",
+        plot_kind="residual",
+    )
+    plot_combined_diagnostic_grid(
+        gt_train=gt_train,
+        pred_train=pred_train,
+        gt_test=gt_test,
+        pred_test=pred_test,
+        variable_names=variable_names,
+        save_path=FIG_DIR / "combined_error_vs_true_grid.png",
+        plot_kind="error_vs_true",
+    )
+    plot_combined_diagnostic_grid(
+        gt_train=gt_train,
+        pred_train=pred_train,
+        gt_test=gt_test,
+        pred_test=pred_test,
+        variable_names=variable_names,
+        save_path=FIG_DIR / "combined_error_histogram_grid.png",
+        plot_kind="histogram",
+    )
 
     if not loss_df.empty:
         plot_training_time_vs_accuracy(
@@ -1155,7 +1440,7 @@ def main() -> Dict[str, object]:
 
     if "best_test_loss" in log_summary:
         print(
-            f"Best test loss from log: {log_summary['best_test_loss']:.6f} "
+            f"Best evaluation loss from log: {log_summary['best_test_loss']:.6f} "
             f"at epoch {int(log_summary['best_test_epoch'])}"
         )
 

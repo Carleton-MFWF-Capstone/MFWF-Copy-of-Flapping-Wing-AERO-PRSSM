@@ -17,12 +17,17 @@ class BaseDS:
         self.train_out = np.empty(0)
         self.test_in = np.empty(0)
         self.test_out = np.empty(0)
+        self.val_in = np.empty(0)
+        self.val_out = np.empty(0)
         self.train_pos = np.empty(0)
         self.test_pos = np.empty(0)
+        self.val_pos = np.empty(0)
         self.train_in_batch = np.empty(0)
         self.train_out_batch = np.empty(0)
         self.test_in_batch = np.empty(0)
         self.test_out_batch = np.empty(0)
+        self.val_in_batch = np.empty(0)
+        self.val_out_batch = np.empty(0)
         self.dim_u = np.empty(0)
         self.dim_y = np.empty(0)
         self.data_path = in_dir
@@ -30,11 +35,13 @@ class BaseDS:
     def get_batches(self, seq_len, seq_stride):
         return (self.rnn_batches(self.train_in, seq_len, seq_stride, 0),
                 self.rnn_batches(self.train_out, seq_len, seq_stride, 0),
+                self.rnn_batches(self.val_in, seq_len, seq_stride, 0) if np.size(self.val_in) else np.empty(0),
+                self.rnn_batches(self.val_out, seq_len, seq_stride, 0) if np.size(self.val_out) else np.empty(0),
                 self.rnn_batches(self.test_in, seq_len, seq_stride, 0),
                 self.rnn_batches(self.test_out, seq_len, seq_stride, 0))
 
     def create_batches(self):
-        self.train_in_batch, self.train_out_batch, self.test_in_batch, self.test_out_batch\
+        self.train_in_batch, self.train_out_batch, self.val_in_batch, self.val_out_batch, self.test_in_batch, self.test_out_batch\
             = self.get_batches(self.seq_len, self.seq_stride)
         self.print_stats()
 
@@ -68,5 +75,8 @@ class BaseDS:
         print('  sequence length: %d' % self.seq_len)
         print('  train samples: %d' % (self.train_in.shape[0]*self.train_in.shape[1]))
         print('  train sequences: %d' % self.train_in_batch.shape[0])
+        if np.size(self.val_in):
+            print('  validation samples: %d' % (self.val_in.shape[0]*self.val_in.shape[1]))
+            print('  validation sequences: %d' % self.val_in_batch.shape[0])
         print('  test samples: %d' % (self.test_in.shape[0]*self.test_in.shape[1]))
         print('  test sequences: %d' % self.test_in_batch.shape[0])

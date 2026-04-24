@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.err.log
+
+Data/Output/
+handoff/
+.vscode/
+
+Python_PRSSM/__pycache__/
+Python_PRSSM/**/__pycache__/

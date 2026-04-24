@@ -37,6 +37,16 @@ class Outputs:
     def create_all(self):
         assert self.model is not None
         assert self.ds is not None
+        preferred_checkpoints = [
+            self.out_dir + 'best_eval.ckpt',
+            self.out_dir + 'best_test.ckpt',
+            self.out_dir + 'best.ckpt',
+            self.out_dir + 'model.ckpt',
+        ]
+        self.model_path = next(
+            (checkpoint for checkpoint in preferred_checkpoints if os.path.exists(checkpoint + '.index')),
+            self.out_dir + 'best.ckpt',
+        )
         with self.model.graph.as_default():
             with tf.Session() as sess:
                 self.model.saver.restore(sess, self.model_path)
